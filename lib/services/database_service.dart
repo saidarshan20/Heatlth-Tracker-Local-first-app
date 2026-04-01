@@ -260,6 +260,12 @@ class DatabaseService {
     return await db.query('medicines', where: 'active = 1', orderBy: 'reminder_time');
   }
 
+  static Future<Map<String, dynamic>?> getMedicineById(int id) async {
+    final db = await database;
+    final r = await db.query('medicines', where: 'id = ?', whereArgs: [id], limit: 1);
+    return r.isNotEmpty ? r.first : null;
+  }
+
   static Future<void> deleteMedicine(int id) async {
     final db = await database;
     await db.update('medicines', {'active': 0}, where: 'id = ?', whereArgs: [id]);
@@ -343,6 +349,14 @@ class DatabaseService {
     final db = await database;
     final r = await db.query('fasting_logs', where: 'end_time IS NOT NULL', orderBy: 'id DESC', limit: 1);
     return r.isNotEmpty ? r.first : null;
+  }
+
+  static Future<List<Map<String, dynamic>>> getFastingHistory({int limit = 30}) async {
+    final db = await database;
+    return await db.query('fasting_logs',
+        where: 'end_time IS NOT NULL',
+        orderBy: 'id DESC',
+        limit: limit);
   }
 
   // ── Common Meals ──

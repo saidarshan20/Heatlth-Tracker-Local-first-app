@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/database_service.dart';
+import '../services/notification_service.dart';
 
 class DashboardProvider extends ChangeNotifier {
   // Goals
@@ -90,6 +91,28 @@ class DashboardProvider extends ChangeNotifier {
     await DatabaseService.takeMedicine(today, medId, now);
     // Auto-log 250ml water
     await DatabaseService.addWater(today, 250);
+
+    // Cancel today's upcoming alarm so it doesn't fire after already taken
+    final notifId = 1000 + medId;
+    await NotificationService.cancelNotification(notifId);
+    // Reschedule for tomorrow at the same time (so the daily reminder continues)
+    final med = await DatabaseService.getMedicineById(medId);
+    if (med != null) {
+      final parts = (med['reminder_time'] as String).split(':');
+      if (parts.length == 2) {
+        final hour = int.tryParse(parts[0]) ?? 9;
+        final minute = int.tryParse(parts[1]) ?? 0;
+        // Schedule from tomorrow onwards
+        await NotificationService.scheduleDailyNotificationFromTomorrow(
+          id: notifId,
+          title: '💊 Medicine Reminder',
+          body: 'Time to take ${med['name']}',
+          hour: hour,
+          minute: minute,
+        );
+      }
+    }
+
     await refresh();
   }
 
@@ -97,7 +120,6 @@ class DashboardProvider extends ChangeNotifier {
     await DatabaseService.undoMedicine(today, medId);
     // Remove the auto-logged 250ml water (delete most recent 250ml entry for today)
     if (waterEntries.isNotEmpty) {
-      // Find the most recent 250ml water log
       final waterEntry = waterEntries.firstWhere(
         (w) => (w['ml'] as int) == 250 && (w['type'] ?? 'water') == 'water',
         orElse: () => <String, dynamic>{},
@@ -106,6 +128,26 @@ class DashboardProvider extends ChangeNotifier {
         await DatabaseService.deleteWater(waterEntry['id'] as int);
       }
     }
+
+    // Reinstate the notification — scheduleDailyNotification fires today if time
+    // hasn't passed yet, or tomorrow if it has, so this is always safe to call.
+    final notifId = 1000 + medId;
+    final med = await DatabaseService.getMedicineById(medId);
+    if (med != null) {
+      final parts = (med['reminder_time'] as String).split(':');
+      if (parts.length == 2) {
+        final hour = int.tryParse(parts[0]) ?? 9;
+        final minute = int.tryParse(parts[1]) ?? 0;
+        await NotificationService.scheduleDailyNotification(
+          id: notifId,
+          title: '💊 Medicine Reminder',
+          body: 'Time to take ${med['name']}',
+          hour: hour,
+          minute: minute,
+        );
+      }
+    }
+
     await refresh();
   }
 

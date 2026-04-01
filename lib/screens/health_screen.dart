@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import '../providers/dashboard_provider.dart';
 import '../services/database_service.dart';
+import '../services/notification_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
 
@@ -35,22 +36,45 @@ class _HealthScreenState extends State<HealthScreen> {
   Future<void> _loadData() async {
     _activeFast = await DatabaseService.getActiveFast();
     _weights = await DatabaseService.getWeightHistory();
-    if (_activeFast != null) _startTimer();
+    if (_activeFast != null) {
+      _startTimer();
+      // Resume the live notification if a fast was already running
+      final start = DateTime.parse(_activeFast!['start_time']);
+      await NotificationService.showFastingNotification(start);
+    }
     if (mounted) setState(() {});
   }
 
+  int _notifTickCount = 0;
+
   void _startTimer() {
     _fastTimer?.cancel();
+    _notifTickCount = 0;
     _fastTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (_activeFast == null) return;
       final start = DateTime.parse(_activeFast!['start_time']);
       setState(() { _elapsed = DateTime.now().difference(start); });
+      // Refresh the live notification every 60 seconds
+      _notifTickCount++;
+      if (_notifTickCount % 60 == 0) {
+        NotificationService.showFastingNotification(start);
+      }
     });
+    // Tick immediately so elapsed is correct before the first second
+    if (_activeFast != null) {
+      final start = DateTime.parse(_activeFast!['start_time']);
+      setState(() { _elapsed = DateTime.now().difference(start); });
+    }
   }
 
   Future<void> _startFast() async {
     await DatabaseService.startFast(DateTime.now().toIso8601String());
     await _loadData();
+    // Show the live notification immediately
+    if (_activeFast != null) {
+      final start = DateTime.parse(_activeFast!['start_time']);
+      await NotificationService.showFastingNotification(start);
+    }
   }
 
   Future<void> _endFast() async {
@@ -59,13 +83,28 @@ class _HealthScreenState extends State<HealthScreen> {
     final dur = DateTime.now().difference(start).inMinutes;
     await DatabaseService.endFast(_activeFast!['id'] as int, DateTime.now().toIso8601String(), dur);
     _fastTimer?.cancel();
+    await NotificationService.cancelFastingNotification();
     setState(() { _activeFast = null; _elapsed = Duration.zero; });
     await _loadData();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('⚡ Fast ended! Duration: ${dur ~/ 60}h ${dur % 60}m')),
       );
+      // Automatically open history so user sees their result
+      _showFastingHistory();
     }
+  }
+
+  Future<void> _showFastingHistory() async {
+    final history = await DatabaseService.getFastingHistory();
+
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _FastingHistorySheet(history: history),
+    );
   }
 
   void _showAddMedicineDialog() {
@@ -252,7 +291,17 @@ class _HealthScreenState extends State<HealthScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('⚡ Fasting Tracker', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('⚡ Fasting Tracker', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                      TextButton(
+                        onPressed: _showFastingHistory,
+                        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                        child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 12),
                   if (_activeFast != null) ...[
                     Row(
@@ -503,3 +552,234 @@ class _HealthScreenState extends State<HealthScreen> {
     );
   }
 }
+
+// ─────────────────────────────────────────────
+// Fasting History Bottom Sheet
+// ─────────────────────────────────────────────
+class _FastingHistorySheet extends StatelessWidget {
+  final List<Map<String, dynamic>> history;
+  const _FastingHistorySheet({required this.history});
+
+  static const int _goalMinutes = 16 * 60;
+
+  String _fmt(int minutes) {
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return m == 0 ? '${h}h' : '${h}h ${m}m';
+  }
+
+  String _fmtDate(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${dt.day} ${months[dt.month - 1]}';
+    } catch (_) { return ''; }
+  }
+
+  String _fmtTime(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final m = dt.minute.toString().padLeft(2, '0');
+      final ampm = dt.hour < 12 ? 'AM' : 'PM';
+      return '$h:$m $ampm';
+    } catch (_) { return ''; }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Summary stats
+    int totalFasts = history.length;
+    int bestMin = 0, sumMin = 0;
+    for (final f in history) {
+      final d = (f['duration_min'] as int?) ?? 0;
+      if (d > bestMin) bestMin = d;
+      sumMin += d;
+    }
+    final avgMin = totalFasts > 0 ? sumMin ~/ totalFasts : 0;
+    final goalsHit = history.where((f) => ((f['duration_min'] as int?) ?? 0) >= _goalMinutes).length;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65,
+      minChildSize: 0.4,
+      maxChildSize: 0.92,
+      expand: false,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surfaceContainer,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // Handle
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Container(width: 36, height: 4,
+                decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99))),
+            ),
+            // Title
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  const Text('⚡ Fasting History',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Spacer(),
+                  Text('$totalFasts sessions',
+                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ── Summary strip ──
+            if (totalFasts > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    _statChip('🏆 Best', _fmt(bestMin)),
+                    const SizedBox(width: 8),
+                    _statChip('📊 Avg', _fmt(avgMin)),
+                    const SizedBox(width: 8),
+                    _statChip('🎯 Goals hit', '$goalsHit / $totalFasts'),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: AppColors.outline),
+
+            // ── List ──
+            Expanded(
+              child: history.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('⚡', style: TextStyle(fontSize: 36)),
+                          SizedBox(height: 8),
+                          Text('No completed fasts yet.',
+                              style: TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
+                          SizedBox(height: 4),
+                          Text('Start your first fast from the Health screen.',
+                              style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                      itemCount: history.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) {
+                        final f = history[i];
+                        final durMin = (f['duration_min'] as int?) ?? 0;
+                        final goalMet = durMin >= _goalMinutes;
+                        final progress = (durMin / _goalMinutes).clamp(0.0, 1.0);
+                        final dateLabel = _fmtDate(f['start_time'] as String);
+                        final startLabel = _fmtTime(f['start_time'] as String);
+                        final endLabel = _fmtTime(f['end_time'] as String);
+
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(16),
+                            border: goalMet
+                                ? Border.all(color: AppColors.primary.withOpacity(0.4), width: 1)
+                                : null,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Top row: date + goal pill
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(dateLabel,
+                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                                          color: AppColors.onSurface)),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: goalMet
+                                          ? AppColors.primary.withOpacity(0.15)
+                                          : AppColors.surfaceContainer,
+                                      borderRadius: BorderRadius.circular(99),
+                                    ),
+                                    child: Text(
+                                      goalMet ? '🎯 Goal met' : '⏱ ${_fmt(durMin)}',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w600,
+                                          color: goalMet ? AppColors.primary : AppColors.onSurfaceVariant),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              // Duration + times
+                              Row(
+                                children: [
+                                  Text(
+                                    _fmt(durMin),
+                                    style: TextStyle(
+                                        fontSize: 22, fontWeight: FontWeight.w800,
+                                        color: goalMet ? AppColors.primary : AppColors.onSurface),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Text('$startLabel → $endLabel',
+                                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              // Progress bar
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(99),
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 5,
+                                  backgroundColor: AppColors.surfaceContainer,
+                                  valueColor: AlwaysStoppedAnimation(
+                                      goalMet ? AppColors.primary : AppColors.onSurfaceVariant),
+                                ),
+                              ),
+                              if (goalMet) ...[
+                                const SizedBox(height: 4),
+                                Text('+${_fmt(durMin - _goalMinutes)} over goal',
+                                    style: const TextStyle(fontSize: 9, color: AppColors.primary)),
+                              ],
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statChip(String label, String value) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant)),
+            const SizedBox(height: 2),
+            Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+

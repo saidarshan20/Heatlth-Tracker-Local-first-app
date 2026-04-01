@@ -11,6 +11,9 @@ class NotificationService {
   static bool _isRescheduling = false;
   static DateTime? _lastReschedule;
 
+  // Reserved ID for the live fasting notification
+  static const int fastingNotificationId = 8888;
+
   static Future<void> init() async {
     if (_initialized) return;
 
@@ -87,6 +90,44 @@ class NotificationService {
     );
   }
 
+  /// Like [scheduleDailyNotification] but always starts from tomorrow.
+  /// Use this after a medicine is marked as taken so today's alarm is skipped.
+  static Future<void> scheduleDailyNotificationFromTomorrow({
+    required int id,
+    required String title,
+    required String body,
+    required int hour,
+    required int minute,
+  }) async {
+    final now = tz.TZDateTime.now(tz.local);
+    // Force tomorrow regardless of current time
+    final tomorrow = now.add(const Duration(days: 1));
+    final scheduled = tz.TZDateTime(tz.local, tomorrow.year, tomorrow.month, tomorrow.day, hour, minute);
+
+    print('Scheduling (tomorrow) notification #$id "$title" at $scheduled');
+
+    await _plugin.zonedSchedule(
+      id: id,
+      title: title,
+      body: body,
+      scheduledDate: scheduled,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'health_tracker_reminders',
+          'Health Tracker Reminders',
+          channelDescription: 'Medicine, water, and meal reminders',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/launcher_icon',
+          playSound: true,
+          enableVibration: true,
+        ),
+      ),
+      androidScheduleMode: AndroidScheduleMode.alarmClock,
+      matchDateTimeComponents: DateTimeComponents.time,
+    );
+  }
+
   /// Send an immediate test notification
   static Future<void> sendTestNotification() async {
     await _plugin.show(
@@ -114,6 +155,52 @@ class NotificationService {
 
   static Future<void> cancelAll() async {
     await _plugin.cancelAll();
+  }
+
+  /// Shows (or updates) a persistent live-fasting notification.
+  /// Call this once when a fast starts, and again every minute to refresh the timer.
+  static Future<void> showFastingNotification(DateTime startTime) async {
+    final elapsed = DateTime.now().difference(startTime);
+    final goalMinutes = 16 * 60;
+    final remaining = Duration(minutes: (goalMinutes - elapsed.inMinutes).clamp(0, goalMinutes));
+    final progress = (elapsed.inMinutes / goalMinutes).clamp(0.0, 1.0);
+
+    final elapsedStr =
+        '${elapsed.inHours}h ${(elapsed.inMinutes % 60).toString().padLeft(2, '0')}m';
+    final remainingStr = elapsed.inMinutes >= goalMinutes
+        ? '🎉 Goal reached!'
+        : '${remaining.inHours}h ${(remaining.inMinutes % 60).toString().padLeft(2, '0')}m left';
+
+    // Build a simple ASCII progress bar (10 chars)
+    final filled = (progress * 10).round();
+    final bar = '${'█' * filled}${'░' * (10 - filled)}';
+
+    await _plugin.show(
+      id: fastingNotificationId,
+      title: '⚡ Fasting — $elapsedStr elapsed',
+      body: '$bar  $remainingStr',
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'health_tracker_fasting',
+          'Fasting Tracker',
+          channelDescription: 'Live fasting progress notification',
+          importance: Importance.low,      // low = silent, no heads-up popup
+          priority: Priority.low,
+          icon: '@mipmap/launcher_icon',
+          ongoing: true,                  // can't be swiped away
+          autoCancel: false,
+          showWhen: false,                // hide timestamp – we have our own timer
+          onlyAlertOnce: true,            // don't buzz on every update
+          playSound: false,
+          enableVibration: false,
+        ),
+      ),
+    );
+  }
+
+  /// Cancels the live fasting notification when the fast ends.
+  static Future<void> cancelFastingNotification() async {
+    await _plugin.cancel(id: fastingNotificationId);
   }
 
   /// Reschedule all reminders from the database
