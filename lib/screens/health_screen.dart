@@ -228,6 +228,20 @@ class _HealthScreenState extends State<HealthScreen> {
     );
   }
 
+  Future<void> _showWeightHistorySheet() async {
+    final history = await DatabaseService.getFullWeightHistory();
+    final reminder = await DatabaseService.getWeightReminder();
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _WeightHistorySheet(initialHistory: history, initialReminder: reminder),
+    );
+    // Refresh main screen chart after any edits/deletes
+    await _loadData();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Consumer<DashboardProvider>(
@@ -356,9 +370,21 @@ class _HealthScreenState extends State<HealthScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('⚖️ Weight History', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                      IconButton(
-                        icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
-                        onPressed: _showAddWeightDialog,
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextButton(
+                            onPressed: _showWeightHistorySheet,
+                            style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                            child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
+                            onPressed: _showAddWeightDialog,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -783,3 +809,785 @@ class _FastingHistorySheet extends StatelessWidget {
   }
 }
 
+// ─────────────────────────────────────────────
+// Weight History Bottom Sheet
+// ─────────────────────────────────────────────
+class _WeightHistorySheet extends StatefulWidget {
+  final List<Map<String, dynamic>> initialHistory;
+  final Map<String, dynamic>? initialReminder;
+  const _WeightHistorySheet({required this.initialHistory, this.initialReminder});
+
+  @override
+  State<_WeightHistorySheet> createState() => _WeightHistorySheetState();
+}
+
+class _WeightHistorySheetState extends State<_WeightHistorySheet> {
+  late List<Map<String, dynamic>> _history;
+  Map<String, dynamic>? _reminder;
+
+  int _selectedWeekday = DateTime.monday;
+  TimeOfDay _selectedTime = const TimeOfDay(hour: 8, minute: 0);
+  bool _editingReminder = false;
+
+  static const _dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+  @override
+  void initState() {
+    super.initState();
+    _history = List.from(widget.initialHistory);
+    _reminder = widget.initialReminder;
+    if (_reminder != null) {
+      _selectedWeekday = int.tryParse(_reminder!['label'].toString()) ?? DateTime.monday;
+      _selectedTime = TimeOfDay(hour: _reminder!['hour'] as int, minute: _reminder!['minute'] as int);
+    }
+  }
+
+  String _fmtDate(String dateStr) {
+    try {
+      final dt = DateTime.parse(dateStr);
+      const m = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${dt.day} ${m[dt.month - 1]} ${dt.year}';
+    } catch (_) { return dateStr; }
+  }
+
+  String _fmtTime(TimeOfDay t) {
+    final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
+    final m = t.minute.toString().padLeft(2, '0');
+    final ampm = t.period == DayPeriod.am ? 'AM' : 'PM';
+    return '$h:$m $ampm';
+  }
+
+  Future<void> _editWeight(Map<String, dynamic> entry) async {
+    final ctrl = TextEditingController(text: (entry['weight_kg'] as num).toStringAsFixed(1));
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Edit Weight', style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans')),
+        content: TextField(
+          controller: ctrl,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          autofocus: true,
+          style: const TextStyle(color: AppColors.onSurface),
+          decoration: InputDecoration(
+            suffixText: 'kg',
+            suffixStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+            filled: true, fillColor: AppColors.surfaceContainerHigh,
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final newKg = double.tryParse(ctrl.text);
+    if (newKg == null || newKg <= 0) return;
+    await DatabaseService.updateWeight(entry['id'] as int, newKg);
+    setState(() {
+      final idx = _history.indexWhere((e) => e['id'] == entry['id']);
+      if (idx != -1) _history[idx] = Map.from(_history[idx])..['weight_kg'] = newKg;
+    });
+  }
+
+  Future<void> _deleteWeight(Map<String, dynamic> entry) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Delete Entry?', style: TextStyle(color: AppColors.onSurface)),
+        content: Text(
+          'Remove ${(entry['weight_kg'] as num).toStringAsFixed(1)} kg on ${_fmtDate(entry['date'] as String)}?',
+          style: const TextStyle(fontSize: 13, color: AppColors.onSurfaceVariant),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await DatabaseService.deleteWeightById(entry['id'] as int);
+    setState(() => _history.removeWhere((e) => e['id'] == entry['id']));
+  }
+
+  Future<void> _saveReminder() async {
+    await DatabaseService.setWeightReminder(_selectedWeekday, _selectedTime.hour, _selectedTime.minute);
+    await NotificationService.scheduleWeeklyWeightReminder(
+      weekday: _selectedWeekday, hour: _selectedTime.hour, minute: _selectedTime.minute,
+    );
+    setState(() {
+      _reminder = {'label': '$_selectedWeekday', 'hour': _selectedTime.hour, 'minute': _selectedTime.minute};
+      _editingReminder = false;
+    });
+  }
+
+  Future<void> _clearReminder() async {
+    await DatabaseService.clearWeightReminder();
+    await NotificationService.cancelWeightReminder();
+    setState(() { _reminder = null; _editingReminder = false; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final weights = _history.map((e) => (e['weight_kg'] as num).toDouble()).toList();
+    final current = weights.isNotEmpty ? weights.first : null;
+    final highest = weights.isNotEmpty ? weights.reduce((a, b) => a > b ? a : b) : null;
+    final lowest  = weights.isNotEmpty ? weights.reduce((a, b) => a < b ? a : b) : null;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.70,
+      minChildSize: 0.4,
+      maxChildSize: 0.93,
+      expand: false,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surfaceContainer,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // Handle
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Container(width: 36, height: 4,
+                decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99))),
+            ),
+            // Title row
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  const Text('\u2696\ufe0f Weight History',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Spacer(),
+                  Text('${_history.length} entries',
+                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Summary chips
+            if (current != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(children: [
+                  _statChip('\ud83d\udccd Current', '${current.toStringAsFixed(1)} kg'),
+                  const SizedBox(width: 8),
+                  _statChip('\ud83d\udcc8 Highest', '${highest!.toStringAsFixed(1)} kg'),
+                  const SizedBox(width: 8),
+                  _statChip('\ud83d\udcc9 Lowest', '${lowest!.toStringAsFixed(1)} kg'),
+                ]),
+              ),
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: AppColors.outline),
+            // Scrollable list (entries + reminder section as last item)
+            Expanded(
+              child: ListView.separated(
+                controller: scrollCtrl,
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                itemCount: _history.isEmpty ? 1 : _history.length + 1,
+                separatorBuilder: (_, __) => const SizedBox(height: 6),
+                itemBuilder: (_, i) {
+                  // Last item → reminder section
+                  if (_history.isEmpty || i == _history.length) return _buildReminderSection();
+
+                  final entry = _history[i];
+                  final kg = (entry['weight_kg'] as num).toDouble();
+                  final isLatest = i == 0;
+                  return Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(14),
+                      border: isLatest
+                          ? Border.all(color: AppColors.primary.withOpacity(0.4), width: 1)
+                          : null,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(_fmtDate(entry['date'] as String),
+                                  style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                              const SizedBox(height: 2),
+                              Text('${kg.toStringAsFixed(1)} kg',
+                                  style: TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.w700,
+                                    color: isLatest ? AppColors.primary : AppColors.onSurface,
+                                  )),
+                            ],
+                          ),
+                        ),
+                        if (isLatest)
+                          Container(
+                            margin: const EdgeInsets.only(right: 8),
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(99),
+                            ),
+                            child: const Text('Latest', style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: AppColors.primary)),
+                          ),
+                        // Edit button
+                        InkWell(
+                          onTap: () => _editWeight(entry),
+                          borderRadius: BorderRadius.circular(8),
+                          child: const Padding(
+                            padding: EdgeInsets.all(7),
+                            child: Icon(Icons.edit_outlined, size: 17, color: AppColors.primary),
+                          ),
+                        ),
+                        // Delete button
+                        InkWell(
+                          onTap: () => _deleteWeight(entry),
+                          borderRadius: BorderRadius.circular(8),
+                          child: const Padding(
+                            padding: EdgeInsets.all(7),
+                            child: Icon(Icons.delete_outline, size: 17, color: AppColors.error),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildReminderSection() {
+    final activeWd = _reminder != null
+        ? int.tryParse(_reminder!['label'].toString()) ?? DateTime.monday
+        : _selectedWeekday;
+    final activeTime = _reminder != null
+        ? TimeOfDay(hour: _reminder!['hour'] as int, minute: _reminder!['minute'] as int)
+        : _selectedTime;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(height: 28, color: AppColors.outline),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            const Text('\ud83d\udd14 Weekly Reminder',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+            if (_reminder != null && !_editingReminder)
+              TextButton(
+                onPressed: () => setState(() => _editingReminder = true),
+                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8), minimumSize: Size.zero),
+                child: const Text('Edit', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+              ),
+          ],
+        ),
+        const SizedBox(height: 10),
+
+        // ── Active reminder display ──
+        if (_reminder != null && !_editingReminder) ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withOpacity(0.08),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: AppColors.primary.withOpacity(0.25)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.alarm, color: AppColors.primary, size: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Every ${_dayLabels[activeWd - 1]} at ${_fmtTime(activeTime)}',
+                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.primary),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _clearReminder,
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8), minimumSize: Size.zero),
+                  child: const Text('Remove', style: TextStyle(fontSize: 11, color: AppColors.error)),
+                ),
+              ],
+            ),
+          ),
+        ] else ...[
+          // ── Reminder setup UI ──
+          const Text('Pick a day to weigh in every week:',
+              style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+          const SizedBox(height: 10),
+          // Day chips
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: List.generate(7, (i) {
+                final wd = i + 1;
+                final isSelected = _selectedWeekday == wd;
+                return Padding(
+                  padding: const EdgeInsets.only(right: 7),
+                  child: GestureDetector(
+                    onTap: () => setState(() => _selectedWeekday = wd),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: isSelected ? AppColors.primary : AppColors.surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(99),
+                        border: Border.all(color: isSelected ? AppColors.primary : AppColors.outline),
+                      ),
+                      child: Text(
+                        _dayLabels[i],
+                        style: TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600,
+                          color: isSelected ? AppColors.surface : AppColors.onSurface,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // Time picker
+          GestureDetector(
+            onTap: () async {
+              final t = await showTimePicker(context: context, initialTime: _selectedTime);
+              if (t != null) setState(() => _selectedTime = t);
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceContainerHigh,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: AppColors.outline),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.access_time, size: 16, color: AppColors.primary),
+                  const SizedBox(width: 8),
+                  Text(_fmtTime(_selectedTime),
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.arrow_drop_down, size: 18, color: AppColors.onSurfaceVariant),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _saveReminder,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary, foregroundColor: AppColors.surface,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                  child: const Text('Set Reminder'),
+                ),
+              ),
+              if (_editingReminder) ...[
+                const SizedBox(width: 8),
+                TextButton(
+                  onPressed: () => setState(() => _editingReminder = false),
+                  child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant)),
+                ),
+              ],
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  Widget _statChip(String label, String value) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant)),
+            const SizedBox(height: 2),
+            Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+
+// ─────────────────────────────────────────────
+// Water History Bottom Sheet
+// ─────────────────────────────────────────────
+class WaterHistorySheet extends StatefulWidget {
+  final Map<String, dynamic> data;
+  const WaterHistorySheet({super.key, required this.data});
+
+  @override
+  State<WaterHistorySheet> createState() => WaterHistorySheetState();
+}
+
+class WaterHistorySheetState extends State<WaterHistorySheet> {
+  final Set<int> _expandedIndices = {};
+
+  static const int _goalMl = 2500;
+
+  String _fmtDate(String dateStr) {
+    try {
+      final dt = DateTime.parse(dateStr);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+      return '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
+    } catch (_) { return dateStr; }
+  }
+
+  String _fmtTime(String? createdAt) {
+    if (createdAt == null) return '';
+    try {
+      final raw = createdAt.replaceAll(' ', 'T') + 'Z';
+      final dt = DateTime.parse(raw).toLocal();
+      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final m = dt.minute.toString().padLeft(2, '0');
+      final ap = dt.hour < 12 ? 'AM' : 'PM';
+      return '$h:$m $ap';
+    } catch (_) { return ''; }
+  }
+
+  Color _barColor(int ml) {
+    if (ml >= _goalMl) return AppColors.water;
+    if (ml >= _goalMl * 0.7) return AppColors.water.withOpacity(0.6);
+    return AppColors.error.withOpacity(0.5);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final days = widget.data['days'] as List<dynamic>;
+    final peak = widget.data['peak'] as Map<String, dynamic>?;
+    final lowest = widget.data['lowest'] as Map<String, dynamic>?;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.72,
+      minChildSize: 0.45,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surfaceContainer,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // ── Drag handle ──
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99)),
+              ),
+            ),
+
+            // ── Title ──
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  const Text('💧 Water History',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Spacer(),
+                  Text('${days.length} days',
+                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ── Peak / Lowest stat chips ──
+            if (peak != null && lowest != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    // Highest
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.water.withOpacity(0.18), AppColors.water.withOpacity(0.06)],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: AppColors.water.withOpacity(0.35)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Row(
+                              children: [
+                                Text('🏆', style: TextStyle(fontSize: 13)),
+                                SizedBox(width: 4),
+                                Text('Best Day', style: TextStyle(fontSize: 10, color: AppColors.water, fontWeight: FontWeight.w700)),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${(peak['total_ml'] as int)} ml',
+                              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.water),
+                            ),
+                            Text(
+                              _fmtDate(peak['date'] as String),
+                              style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    // Lowest
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [AppColors.error.withOpacity(0.13), AppColors.error.withOpacity(0.04)],
+                          ),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: AppColors.error.withOpacity(0.3)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const Text('📉', style: TextStyle(fontSize: 13)),
+                                const SizedBox(width: 4),
+                                Text('Lowest Day',
+                                    style: TextStyle(fontSize: 10, color: AppColors.error, fontWeight: FontWeight.w700)),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${(lowest['total_ml'] as int)} ml',
+                              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.error),
+                            ),
+                            Text(
+                              _fmtDate(lowest['date'] as String),
+                              style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: AppColors.outline),
+
+            // ── Daily list ──
+            Expanded(
+              child: days.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('💧', style: TextStyle(fontSize: 40)),
+                          SizedBox(height: 8),
+                          Text('No water logged yet.',
+                              style: TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
+                          SizedBox(height: 4),
+                          Text('Start logging from the Home screen.',
+                              style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+                      itemCount: days.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) {
+                        final day = days[i] as Map<String, dynamic>;
+                        final totalMl = day['total_ml'] as int;
+                        final entries = day['entries'] as List<dynamic>;
+                        final pct = (totalMl / _goalMl).clamp(0.0, 1.0);
+                        final goalMet = totalMl >= _goalMl;
+                        final isExpanded = _expandedIndices.contains(i);
+                        final isPeak = peak != null && day['date'] == peak['date'];
+                        final isLowest = lowest != null && day['date'] == lowest['date'];
+
+                        return GestureDetector(
+                          onTap: () => setState(() {
+                            if (isExpanded) _expandedIndices.remove(i);
+                            else _expandedIndices.add(i);
+                          }),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppColors.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(16),
+                              border: isPeak
+                                  ? Border.all(color: AppColors.water.withOpacity(0.45), width: 1.5)
+                                  : isLowest
+                                      ? Border.all(color: AppColors.error.withOpacity(0.35), width: 1.5)
+                                      : null,
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                // ── Row: date + badge + ml ──
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Text(_fmtDate(day['date'] as String),
+                                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                                              if (isPeak) ...[
+                                                const SizedBox(width: 6),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: AppColors.water.withOpacity(0.18),
+                                                    borderRadius: BorderRadius.circular(99),
+                                                  ),
+                                                  child: const Text('🏆 Best', style: TextStyle(fontSize: 9, color: AppColors.water, fontWeight: FontWeight.w700)),
+                                                ),
+                                              ] else if (isLowest) ...[
+                                                const SizedBox(width: 6),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: AppColors.error.withOpacity(0.13),
+                                                    borderRadius: BorderRadius.circular(99),
+                                                  ),
+                                                  child: Text('📉 Low', style: TextStyle(fontSize: 9, color: AppColors.error, fontWeight: FontWeight.w700)),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text('${entries.length} log${entries.length == 1 ? '' : 's'}',
+                                              style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                                        ],
+                                      ),
+                                    ),
+                                    // ml + goal badge
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      children: [
+                                        Text(
+                                          '$totalMl ml',
+                                          style: TextStyle(
+                                            fontSize: 18, fontWeight: FontWeight.w800,
+                                            color: goalMet ? AppColors.water : AppColors.onSurface,
+                                          ),
+                                        ),
+                                        if (goalMet)
+                                          const Text('✅ Goal met',
+                                              style: TextStyle(fontSize: 9, color: AppColors.water, fontWeight: FontWeight.w600))
+                                        else
+                                          Text('${_goalMl - totalMl} ml short',
+                                              style: TextStyle(fontSize: 9, color: AppColors.error.withOpacity(0.8))),
+                                      ],
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Icon(
+                                      isExpanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                                      size: 18, color: AppColors.onSurfaceVariant,
+                                    ),
+                                  ],
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                // ── Progress bar ──
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(99),
+                                  child: LinearProgressIndicator(
+                                    value: pct,
+                                    minHeight: 5,
+                                    backgroundColor: AppColors.surfaceContainer,
+                                    valueColor: AlwaysStoppedAnimation(_barColor(totalMl)),
+                                  ),
+                                ),
+
+                                // ── Expanded: individual entries ──
+                                if (isExpanded && entries.isNotEmpty) ...[
+                                  const SizedBox(height: 10),
+                                  const Divider(height: 1, color: AppColors.outline),
+                                  const SizedBox(height: 8),
+                                  ...entries.map((e) {
+                                    final entry = e as Map<String, dynamic>;
+                                    final isSoft = (entry['type'] ?? 'water') == 'soft_drink';
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: Row(
+                                        children: [
+                                          Text(isSoft ? '🥤' : '💧', style: const TextStyle(fontSize: 12)),
+                                          const SizedBox(width: 8),
+                                          Text(
+                                            '+${entry['ml']} ml',
+                                            style: TextStyle(
+                                              fontSize: 12, fontWeight: FontWeight.w600,
+                                              color: isSoft ? const Color(0xFF9C27B0) : AppColors.water,
+                                            ),
+                                          ),
+                                          if (isSoft) ...[
+                                            const SizedBox(width: 5),
+                                            const Text('Soft drink', style: TextStyle(fontSize: 9, color: Color(0xFF9C27B0))),
+                                          ],
+                                          const Spacer(),
+                                          Text(_fmtTime(entry['created_at'] as String?),
+                                              style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                                ],
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

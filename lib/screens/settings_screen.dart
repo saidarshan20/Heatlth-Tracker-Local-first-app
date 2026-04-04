@@ -1,4 +1,10 @@
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'dart:io';
 import '../services/database_service.dart';
 import '../services/notification_service.dart';
 import '../theme/app_theme.dart';
@@ -18,6 +24,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   List<Map<String, dynamic>> _medicines = [];
   bool _waterExpanded = false;
   bool _medExpanded = false;
+  bool _isExporting = false;
+  bool _isImporting = false;
 
   @override
   void initState() {
@@ -379,10 +387,187 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ],
               ),
             ),
+
+            const SizedBox(height: 8),
+
+            // ── Data Management ──
+            AppCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('💾 Data Management', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Export or restore all your health data as a JSON backup file.',
+                    style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                  ),
+                  const SizedBox(height: 12),
+
+                  // ── Export Button ──
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _isExporting ? null : _exportData,
+                      icon: _isExporting
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.surface))
+                          : const Icon(Icons.upload_rounded, size: 18),
+                      label: Text(_isExporting ? 'Exporting…' : 'Export Data (Backup)'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary,
+                        foregroundColor: AppColors.surface,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+
+                  // ── Import Button ──
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _isImporting ? null : _importData,
+                      icon: _isImporting
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary))
+                          : const Icon(Icons.download_rounded, size: 18),
+                      label: Text(_isImporting ? 'Importing…' : 'Import Data (Restore)'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.primary,
+                        side: const BorderSide(color: AppColors.outline),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      const Icon(Icons.warning_amber_rounded, size: 13, color: AppColors.error),
+                      const SizedBox(width: 4),
+                      const Expanded(
+                        child: Text(
+                          'Import will overwrite ALL existing data.',
+                          style: TextStyle(fontSize: 10, color: AppColors.error),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
       ),
     );
+  }
+
+  Future<void> _exportData() async {
+    setState(() => _isExporting = true);
+    try {
+      final jsonStr = await DatabaseService.exportAllData();
+      final now = DateTime.now();
+      final fileName =
+          'health_backup_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}.json';
+
+      // Write to a temp file then share it
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/$fileName');
+      await file.writeAsString(jsonStr, flush: true);
+
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'application/json')],
+        subject: 'Health Tracker Backup – $fileName',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ Export failed: $e'), backgroundColor: AppColors.error),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isExporting = false);
+    }
+  }
+
+  Future<void> _importData() async {
+    // Step 1: confirm they really want to overwrite
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('⚠️ Overwrite Data?',
+            style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans', fontSize: 16, fontWeight: FontWeight.w700)),
+        content: const Text(
+          'Importing will permanently replace ALL your current health data with the backup. This cannot be undone.\n\nAre you sure?',
+          style: TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant)),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error, foregroundColor: AppColors.surface),
+            child: const Text('Yes, Overwrite'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    // Step 2: pick the file
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+      allowMultiple: false,
+    );
+    if (result == null || result.files.single.path == null) return;
+
+    setState(() => _isImporting = true);
+    try {
+      final file = File(result.files.single.path!);
+      final jsonStr = await file.readAsString();
+      // Basic sanity check
+      jsonDecode(jsonStr); // throws if invalid JSON
+
+      final summary = await DatabaseService.importAllData(jsonStr);
+      await NotificationService.rescheduleAll();
+
+      if (mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.surfaceContainer,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Text('✅ Import Successful',
+                style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans', fontSize: 16, fontWeight: FontWeight.w700)),
+            content: Text(summary, style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13, height: 1.6)),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx),
+                style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
+                child: const Text('Done'),
+              ),
+            ],
+          ),
+        );
+        await _loadData();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ Import failed: $e'), backgroundColor: AppColors.error),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isImporting = false);
+    }
   }
 
   Widget _buildCollapsibleSection({

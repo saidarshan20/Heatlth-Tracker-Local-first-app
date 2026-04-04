@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/dashboard_provider.dart';
+import '../services/database_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
+import 'health_screen.dart';
 import 'settings_screen.dart';
 
 class HomeScreen extends StatelessWidget {
@@ -97,30 +99,56 @@ class HomeScreen extends StatelessWidget {
                           ),
                         ],
                       ),
-                      // Visual bars — blue for water, purple for soft drink
-                      Row(
-                        children: List.generate(12, (i) {
-                          final totalBars = (dash.totalWater / (DashboardProvider.waterGoal / 12)).round();
-                          final softDrinkBars = (dash.softDrinkWater / (DashboardProvider.waterGoal / 12)).round();
-                          final waterBars = totalBars - softDrinkBars;
-                          
-                          Color barColor;
-                          if (i < waterBars) {
-                            barColor = AppColors.water;
-                          } else if (i < totalBars) {
-                            barColor = const Color(0xFF9C27B0); // Purple for soft drinks
-                          } else {
-                            barColor = AppColors.surfaceContainerHigh;
-                          }
-                          
-                          return Container(
-                            width: 8, height: 28, margin: const EdgeInsets.only(left: 3),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(4),
-                              color: barColor,
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          // History button
+                          TextButton(
+                            onPressed: () async {
+                              final data = await DatabaseService.getDailyWaterHistory();
+                              if (context.mounted) {
+                                showModalBottomSheet(
+                                  context: context,
+                                  isScrollControlled: true,
+                                  backgroundColor: Colors.transparent,
+                                  builder: (_) => WaterHistorySheet(data: data),
+                                );
+                              }
+                            },
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                             ),
-                          );
-                        }),
+                            child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.water)),
+                          ),
+                          const SizedBox(height: 4),
+                          // Visual bars — blue for water, purple for soft drink
+                          Row(
+                            children: List.generate(12, (i) {
+                              final totalBars = (dash.totalWater / (DashboardProvider.waterGoal / 12)).round();
+                              final softDrinkBars = (dash.softDrinkWater / (DashboardProvider.waterGoal / 12)).round();
+                              final waterBars = totalBars - softDrinkBars;
+                              
+                              Color barColor;
+                              if (i < waterBars) {
+                                barColor = AppColors.water;
+                              } else if (i < totalBars) {
+                                barColor = const Color(0xFF9C27B0); // Purple for soft drinks
+                              } else {
+                                barColor = AppColors.surfaceContainerHigh;
+                              }
+                              
+                              return Container(
+                                width: 8, height: 28, margin: const EdgeInsets.only(left: 3),
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(4),
+                                  color: barColor,
+                                ),
+                              );
+                            }),
+                          ),
+                        ],
                       ),
                     ],
                   ),

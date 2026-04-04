@@ -1,11 +1,11 @@
 // ignore_for_file: avoid_print, unnecessary_string_interpolations
+import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' show join, dirname;
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+
 
 class DatabaseService {
   static Database? _db;
@@ -217,6 +217,85 @@ class DatabaseService {
     await db.delete('food_logs', where: 'id = ?', whereArgs: [id]);
   }
 
+  /// Returns per-day aggregated calorie totals (last [days] days), newest first.
+  /// Each item: { 'date', 'total_cal', 'total_prot', 'total_carbs', 'total_fats',
+  ///              'entries': List, 'fasting_min': int, 'fast_count': int }
+  /// Also includes 'peak' and 'lowest' day maps.
+  static Future<Map<String, dynamic>> getDailyCalorieHistory({int days = 90}) async {
+    final db = await database;
+
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final cutoffStr = '${cutoff.year}-${cutoff.month.toString().padLeft(2, '0')}-${cutoff.day.toString().padLeft(2, '0')}';
+
+    final rows = await db.rawQuery('''
+      SELECT date,
+             SUM(calories) as total_cal,
+             SUM(protein)  as total_prot,
+             SUM(carbs)    as total_carbs,
+             SUM(fats)     as total_fats
+      FROM food_logs
+      WHERE date >= ?
+      GROUP BY date
+      ORDER BY date DESC
+    ''', [cutoffStr]);
+
+    final allEntries = await db.query('food_logs',
+        where: 'date >= ?', whereArgs: [cutoffStr], orderBy: 'date DESC, id DESC');
+
+    final Map<String, List<Map<String, dynamic>>> entriesByDate = {};
+    for (final e in allEntries) {
+      final d = e['date'] as String;
+      entriesByDate.putIfAbsent(d, () => []).add(e);
+    }
+
+    // ── Fetch fasting logs per date (date the fast started) ──
+    final fastingRows = await db.rawQuery('''
+      SELECT DATE(start_time) as fast_date,
+             SUM(COALESCE(duration_min, 0)) as total_fast_min,
+             COUNT(*) as fast_count
+      FROM fasting_logs
+      WHERE DATE(start_time) >= ?
+      GROUP BY fast_date
+    ''', [cutoffStr]);
+
+    final Map<String, Map<String, dynamic>> fastingByDate = {};
+    for (final f in fastingRows) {
+      final d = f['fast_date'] as String;
+      fastingByDate[d] = {
+        'fasting_min': (f['total_fast_min'] as num?)?.toInt() ?? 0,
+        'fast_count':  (f['fast_count']     as num?)?.toInt() ?? 0,
+      };
+    }
+
+    final dailyList = rows.map((r) {
+      final date   = r['date'] as String;
+      final fsting = fastingByDate[date];
+      return <String, dynamic>{
+        'date':        date,
+        'total_cal':   (r['total_cal']   as num).toInt(),
+        'total_prot':  (r['total_prot']  as num?)?.toInt() ?? 0,
+        'total_carbs': (r['total_carbs'] as num?)?.toInt() ?? 0,
+        'total_fats':  (r['total_fats']  as num?)?.toInt() ?? 0,
+        'entries':     entriesByDate[date] ?? <Map<String, dynamic>>[],
+        'fasting_min': fsting?['fasting_min'] ?? 0,
+        'fast_count':  fsting?['fast_count']  ?? 0,
+      };
+    }).toList();
+
+    Map<String, dynamic>? peak;
+    Map<String, dynamic>? lowest;
+    for (final d in dailyList) {
+      final cal = d['total_cal'] as int;
+      if (peak == null || cal > (peak['total_cal'] as int)) peak = d;
+      if (lowest == null || cal < (lowest['total_cal'] as int)) lowest = d;
+    }
+
+    return {'days': dailyList, 'peak': peak, 'lowest': lowest};
+  }
+
+
+
+
   // ── Water ──
   static Future<int> addWater(String date, int ml, {String type = 'water'}) async {
     final db = await database;
@@ -248,6 +327,58 @@ class DatabaseService {
     final db = await database;
     await db.delete('water_logs', where: 'id = ?', whereArgs: [id]);
   }
+
+  /// Returns per-day aggregated water totals, newest first.
+  /// Each map: { 'date': String, 'total_ml': int, 'entries': List<Map> }
+  /// Also includes highest/lowest day info in result['peak'] / result['lowest'].
+  static Future<Map<String, dynamic>> getDailyWaterHistory({int days = 90}) async {
+    final db = await database;
+
+    // All logs newest first within the window
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final cutoffStr = '${cutoff.year}-${cutoff.month.toString().padLeft(2, '0')}-${cutoff.day.toString().padLeft(2, '0')}';
+
+    final rows = await db.rawQuery('''
+      SELECT date, SUM(ml) as total_ml
+      FROM water_logs
+      WHERE date >= ?
+      GROUP BY date
+      ORDER BY date DESC
+    ''', [cutoffStr]);
+
+    // Also pull detailed entries per day for the list
+    final allEntries = await db.query('water_logs',
+        where: 'date >= ?', whereArgs: [cutoffStr], orderBy: 'date DESC, id DESC');
+
+    // Build entries map keyed by date
+    final Map<String, List<Map<String, dynamic>>> entriesByDate = {};
+    for (final e in allEntries) {
+      final d = e['date'] as String;
+      entriesByDate.putIfAbsent(d, () => []).add(e);
+    }
+
+    final dailyList = rows.map((r) => {
+      'date': r['date'] as String,
+      'total_ml': (r['total_ml'] as num).toInt(),
+      'entries': entriesByDate[r['date'] as String] ?? [],
+    }).toList();
+
+    // Compute peak & lowest
+    Map<String, dynamic>? peak;
+    Map<String, dynamic>? lowest;
+    for (final d in dailyList) {
+      final ml = d['total_ml'] as int;
+      if (peak == null || ml > (peak['total_ml'] as int)) peak = d;
+      if (lowest == null || ml < (lowest['total_ml'] as int)) lowest = d;
+    }
+
+    return {
+      'days': dailyList,
+      'peak': peak,
+      'lowest': lowest,
+    };
+  }
+
 
   // ── Medicines ──
   static Future<int> addMedicine(String name, String time, String type) async {
@@ -325,6 +456,42 @@ class DatabaseService {
   static Future<List<Map<String, dynamic>>> getWeightHistory({int limit = 7}) async {
     final db = await database;
     return await db.query('weight_logs', orderBy: 'date DESC', limit: limit);
+  }
+
+  static Future<List<Map<String, dynamic>>> getFullWeightHistory() async {
+    final db = await database;
+    return await db.query('weight_logs', orderBy: 'date DESC, id DESC');
+  }
+
+  static Future<void> updateWeight(int id, double kg) async {
+    final db = await database;
+    await db.update('weight_logs', {'weight_kg': kg}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteWeightById(int id) async {
+    final db = await database;
+    await db.delete('weight_logs', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // type='weight_weekly', label=weekday int (1=Mon..7=Sun), hour/minute = time
+  static Future<Map<String, dynamic>?> getWeightReminder() async {
+    final db = await database;
+    final r = await db.query('reminders', where: "type = 'weight_weekly'", limit: 1);
+    return r.isNotEmpty ? r.first : null;
+  }
+
+  static Future<void> setWeightReminder(int weekday, int hour, int minute) async {
+    final db = await database;
+    await db.delete('reminders', where: "type = 'weight_weekly'");
+    await db.insert('reminders', {
+      'type': 'weight_weekly', 'label': '$weekday',
+      'hour': hour, 'minute': minute, 'active': 1,
+    });
+  }
+
+  static Future<void> clearWeightReminder() async {
+    final db = await database;
+    await db.delete('reminders', where: "type = 'weight_weekly'");
   }
 
   // ── Fasting ──
@@ -447,5 +614,80 @@ class DatabaseService {
     await addReminder('meal', 'Log Breakfast 🍳', 8, 30);
     await addReminder('meal', 'Log Lunch 🍛', 13, 30);
     await addReminder('meal', 'Log Dinner 🍽️', 20, 30);
+  }
+  // ── Export / Import ──
+
+  /// Returns a JSON string containing ALL data from every table.
+  static Future<String> exportAllData() async {
+    final db = await database;
+
+    final foodLogs      = await db.query('food_logs',      orderBy: 'id ASC');
+    final waterLogs     = await db.query('water_logs',     orderBy: 'id ASC');
+    final medicines     = await db.query('medicines',      orderBy: 'id ASC');
+    final medicineLogs  = await db.query('medicine_logs',  orderBy: 'id ASC');
+    final weightLogs    = await db.query('weight_logs',    orderBy: 'id ASC');
+    final fastingLogs   = await db.query('fasting_logs',   orderBy: 'id ASC');
+    final commonMeals   = await db.query('common_meals',   orderBy: 'id ASC');
+    final reminders     = await db.query('reminders',      orderBy: 'id ASC');
+
+    final payload = {
+      'exported_at': DateTime.now().toIso8601String(),
+      'version': 1,
+      'food_logs':     foodLogs,
+      'water_logs':    waterLogs,
+      'medicines':     medicines,
+      'medicine_logs': medicineLogs,
+      'weight_logs':   weightLogs,
+      'fasting_logs':  fastingLogs,
+      'common_meals':  commonMeals,
+      'reminders':     reminders,
+    };
+
+    return jsonEncode(payload);
+  }
+
+  /// Clears all tables and restores data from a previously exported JSON string.
+  /// Returns a summary string (e.g. "Imported 120 food logs, 80 water logs…").
+  static Future<String> importAllData(String jsonString) async {
+    final db = await database;
+    final Map<String, dynamic> payload = jsonDecode(jsonString) as Map<String, dynamic>;
+
+    await db.transaction((txn) async {
+      // Wipe existing data (order matters for FK constraints)
+      for (final table in [
+        'medicine_logs', 'food_logs', 'water_logs',
+        'weight_logs', 'fasting_logs', 'common_meals',
+        'reminders', 'medicines',
+      ]) {
+        await txn.delete(table);
+      }
+
+      Future<void> insertRows(String table, dynamic rows) async {
+        if (rows == null) return;
+        for (final row in (rows as List)) {
+          final map = Map<String, dynamic>.from(row as Map);
+          map.remove('id'); // let the DB auto-assign new IDs
+          await txn.insert(table, map);
+        }
+      }
+
+      await insertRows('medicines',     payload['medicines']);
+      await insertRows('food_logs',     payload['food_logs']);
+      await insertRows('water_logs',    payload['water_logs']);
+      await insertRows('medicine_logs', payload['medicine_logs']);
+      await insertRows('weight_logs',   payload['weight_logs']);
+      await insertRows('fasting_logs',  payload['fasting_logs']);
+      await insertRows('common_meals',  payload['common_meals']);
+      await insertRows('reminders',     payload['reminders']);
+    });
+
+    int _count(String key) => ((payload[key] as List?)?.length) ?? 0;
+
+    return 'Imported:\n'
+        '• ${_count('food_logs')} food logs\n'
+        '• ${_count('water_logs')} water logs\n'
+        '• ${_count('medicines')} medicines\n'
+        '• ${_count('weight_logs')} weight logs\n'
+        '• ${_count('reminders')} reminders';
   }
 }

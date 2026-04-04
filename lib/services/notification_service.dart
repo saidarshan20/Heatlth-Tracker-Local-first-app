@@ -203,6 +203,50 @@ class NotificationService {
     await _plugin.cancel(id: fastingNotificationId);
   }
 
+  // Reserved ID for the weekly weight reminder
+  static const int weightReminderNotifId = 9000;
+
+  /// Schedules a weekly weight-logging reminder on [weekday] (1=Mon, 7=Sun)
+  /// at [hour]:[minute]. Repeats every week automatically.
+  static Future<void> scheduleWeeklyWeightReminder({
+    required int weekday,
+    required int hour,
+    required int minute,
+  }) async {
+    var dt = tz.TZDateTime.now(tz.local);
+    dt = tz.TZDateTime(tz.local, dt.year, dt.month, dt.day, hour, minute);
+    // Advance until we land on the right weekday AND the time is in the future
+    for (int i = 0; i < 8; i++) {
+      if (dt.weekday == weekday && dt.isAfter(tz.TZDateTime.now(tz.local))) break;
+      dt = dt.add(const Duration(days: 1));
+    }
+    print('Scheduling weekly weight reminder: weekday=$weekday at $dt');
+    await _plugin.zonedSchedule(
+      id: weightReminderNotifId,
+      title: '⚖️ Weigh-in day!',
+      body: "Don't forget to log your weight — track your progress!",
+      scheduledDate: dt,
+      notificationDetails: const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'health_tracker_weight',
+          'Weight Reminders',
+          channelDescription: 'Weekly weight logging reminders',
+          importance: Importance.high,
+          priority: Priority.high,
+          icon: '@mipmap/launcher_icon',
+          playSound: true,
+          enableVibration: true,
+        ),
+      ),
+      androidScheduleMode: AndroidScheduleMode.alarmClock,
+      matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+    );
+  }
+
+  static Future<void> cancelWeightReminder() async {
+    await _plugin.cancel(id: weightReminderNotifId);
+  }
+
   /// Reschedule all reminders from the database
   static Future<void> rescheduleAll() async {
     if (_isRescheduling) return;
