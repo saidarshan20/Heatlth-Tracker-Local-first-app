@@ -295,6 +295,62 @@ class HomeScreen extends StatelessWidget {
                 ),
               ],
             ),
+            const SizedBox(height: 4),
+            Center(
+              child: TextButton(
+                onPressed: () async {
+                  final ctrl = TextEditingController();
+                  final ml = await showDialog<int>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: AppColors.surfaceContainer,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                      title: const Text('Custom Amount', style: TextStyle(color: AppColors.onSurface)),
+                      content: TextField(
+                        controller: ctrl,
+                        keyboardType: TextInputType.number,
+                        autofocus: true,
+                        style: const TextStyle(color: AppColors.onSurface),
+                        decoration: InputDecoration(
+                          hintText: 'e.g. 300',
+                          suffixText: 'ml',
+                          suffixStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+                          hintStyle: const TextStyle(color: AppColors.onSurfaceVariant),
+                          filled: true,
+                          fillColor: AppColors.surfaceContainerHigh,
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        ),
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant)),
+                        ),
+                        ElevatedButton(
+                          onPressed: () => Navigator.pop(ctx, int.tryParse(ctrl.text)),
+                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
+                          child: const Text('Add'),
+                        ),
+                      ],
+                    ),
+                  );
+                  if (ml != null && ml > 0) {
+                    await dash.addWater(ml);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('💧 +${ml}ml water logged!')),
+                      );
+                    }
+                  }
+                },
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text('+ Custom amount', style: TextStyle(color: AppColors.water, fontSize: 12)),
+              ),
+            ),
           ],
         );
       },

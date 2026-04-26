@@ -247,6 +247,67 @@ class NotificationService {
     await _plugin.cancel(id: weightReminderNotifId);
   }
 
+  static const int _waterSuppressionWindowMinutes = 20;
+
+  /// After logging water, cancel any water reminder scheduled to fire within
+  /// the next [_waterSuppressionWindowMinutes] minutes and reschedule from tomorrow.
+  static Future<void> suppressUpcomingWaterReminder() async {
+    final reminders = await DatabaseService.getReminders(type: 'water');
+    final now = DateTime.now();
+    final nowMins = now.hour * 60 + now.minute;
+    final windowEnd = nowMins + _waterSuppressionWindowMinutes;
+
+    for (final r in reminders) {
+      if ((r['active'] as int) != 1) continue;
+      final rMins = (r['hour'] as int) * 60 + (r['minute'] as int);
+      if (rMins < nowMins || rMins > windowEnd) continue;
+
+      final notifId = 2000 + (r['id'] as int);
+      await cancelNotification(notifId);
+      await scheduleDailyNotificationFromTomorrow(
+        id: notifId,
+        title: '💧 Water Reminder',
+        body: (r['label'] as String).isNotEmpty ? r['label'] as String : 'Time to drink some water!',
+        hour: r['hour'] as int,
+        minute: r['minute'] as int,
+      );
+      print('Suppressed water reminder #$notifId — water just logged');
+    }
+  }
+
+  /// After logging food with a meal keyword (breakfast/lunch/dinner), cancel the
+  /// matching meal reminder for today and reschedule from tomorrow.
+  static Future<void> suppressMealReminderIfKeyword(String foodItem) async {
+    final itemLower = foodItem.toLowerCase();
+    final keywords = <String>[];
+    if (itemLower.contains('breakfast')) keywords.add('breakfast');
+    if (itemLower.contains('lunch')) keywords.add('lunch');
+    if (itemLower.contains('dinner')) keywords.add('dinner');
+    if (keywords.isEmpty) return;
+
+    // Skip scheduling-from-tomorrow if a fast is active — rescheduleAll handles resumption on fast end
+    final activeFast = await DatabaseService.getActiveFast();
+
+    final reminders = await DatabaseService.getReminders(type: 'meal');
+    for (final r in reminders) {
+      if ((r['active'] as int) != 1) continue;
+      if (!keywords.any((kw) => (r['label'] as String).toLowerCase().contains(kw))) continue;
+
+      final notifId = 3000 + (r['id'] as int);
+      await cancelNotification(notifId);
+      if (activeFast == null) {
+        await scheduleDailyNotificationFromTomorrow(
+          id: notifId,
+          title: '🍽️ Meal Reminder',
+          body: r['label'] as String,
+          hour: r['hour'] as int,
+          minute: r['minute'] as int,
+        );
+      }
+      print('Suppressed meal reminder #$notifId — "$foodItem" logged');
+    }
+  }
+
   /// Reschedule all reminders from the database
   static Future<void> rescheduleAll() async {
     if (_isRescheduling) return;
@@ -281,6 +342,10 @@ class NotificationService {
         }
       }
 
+      // Skip meal reminders while a fast is active
+      final activeFast = await DatabaseService.getActiveFast();
+      final fastIsActive = activeFast != null;
+
       // Schedule water & meal reminders
       final reminders = await DatabaseService.getReminders();
       for (final r in reminders) {
@@ -301,6 +366,7 @@ class NotificationService {
             minute: minute,
           );
         } else if (type == 'meal') {
+          if (fastIsActive) continue;
           final mealId = 3000 + id;
           await scheduleDailyNotification(
             id: mealId,

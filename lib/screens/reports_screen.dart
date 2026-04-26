@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
+import '../providers/dashboard_provider.dart';
 import '../services/database_service.dart';
 import '../services/gemini_service.dart';
 import '../theme/app_theme.dart';
@@ -150,7 +151,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                     barTouchData: BarTouchData(enabled: false),
                     extraLinesData: ExtraLinesData(
                       horizontalLines: [
-                        HorizontalLine(y: 1800, color: AppColors.outline, strokeWidth: 1, dashArray: [5, 5]),
+                        HorizontalLine(y: DashboardProvider.calGoal.toDouble(), color: AppColors.outline, strokeWidth: 1, dashArray: [5, 5]),
                       ],
                     ),
                   ),
@@ -161,7 +162,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 children: [
                   Container(width: 6, height: 6, decoration: const BoxDecoration(shape: BoxShape.circle, color: AppColors.primary)),
                   const SizedBox(width: 4),
-                  Text('Avg: ${_stats!['avgCal']} kcal/day · Goal: 1800 kcal', style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                  Text('Avg: ${_stats!['avgCal']} kcal/day · Goal: ${DashboardProvider.calGoal} kcal', style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
                 ],
               ),
             ],
@@ -269,7 +270,7 @@ class CalorieHistorySheet extends StatefulWidget {
 }
 
 class _CalorieHistorySheetState extends State<CalorieHistorySheet> {
-  static const int _goalKcal = 1800;
+  int get _goalKcal => DashboardProvider.calGoal;
   final Set<int> _expandedIndices = {};
 
   String _fmtDate(String dateStr) {

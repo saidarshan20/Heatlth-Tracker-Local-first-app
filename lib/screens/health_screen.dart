@@ -69,6 +69,7 @@ class _HealthScreenState extends State<HealthScreen> {
 
   Future<void> _startFast() async {
     await DatabaseService.startFast(DateTime.now().toIso8601String());
+    await NotificationService.rescheduleAll(); // cancels meal notifs while fast is active
     await _loadData();
     // Show the live notification immediately
     if (_activeFast != null) {
@@ -84,6 +85,7 @@ class _HealthScreenState extends State<HealthScreen> {
     await DatabaseService.endFast(_activeFast!['id'] as int, DateTime.now().toIso8601String(), dur);
     _fastTimer?.cancel();
     await NotificationService.cancelFastingNotification();
+    await NotificationService.rescheduleAll(); // restores meal notifs after fast ends
     setState(() { _activeFast = null; _elapsed = Duration.zero; });
     await _loadData();
     if (mounted) {
@@ -336,7 +338,19 @@ class _HealthScreenState extends State<HealthScreen> {
                         valueColor: const AlwaysStoppedAnimation(AppColors.primary),
                       ),
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: 8),
+                    Builder(builder: (ctx) {
+                      final eatEnd = DateTime.parse(_activeFast!['start_time']).add(const Duration(hours: 16));
+                      final h = eatEnd.hour % 12 == 0 ? 12 : eatEnd.hour % 12;
+                      final m = eatEnd.minute.toString().padLeft(2, '0');
+                      final ampm = eatEnd.hour < 12 ? 'AM' : 'PM';
+                      return Text(
+                        'Eating window opens at $h:$m $ampm',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                      );
+                    }),
+                    const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton(

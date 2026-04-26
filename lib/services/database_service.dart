@@ -527,7 +527,7 @@ class DatabaseService {
   }
 
   // ── Common Meals ──
-  static Future<List<Map<String, dynamic>>> getCommonMeals({int minCount = 3, int limit = 8}) async {
+  static Future<List<Map<String, dynamic>>> getCommonMeals({int minCount = 2, int limit = 8}) async {
     final db = await database;
     return await db.query('common_meals',
         where: 'log_count >= ?', whereArgs: [minCount],

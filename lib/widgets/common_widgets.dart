@@ -11,8 +11,10 @@ class CalorieRing extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final pct = (consumed / goal).clamp(0.0, 1.0);
-    final over = consumed > goal;
+    final rawPct = goal > 0 ? consumed / goal : 0.0;
+    final pct = rawPct.clamp(0.0, 1.0);
+    final over = rawPct > 1.0;
+    final approaching = rawPct > 0.85 && !over;
     return SizedBox(
       width: size,
       height: size,
@@ -21,7 +23,7 @@ class CalorieRing extends StatelessWidget {
         children: [
           CustomPaint(
             size: Size(size, size),
-            painter: _RingPainter(pct: pct, over: over),
+            painter: _RingPainter(pct: pct, over: over, approaching: approaching),
           ),
           Column(
             mainAxisSize: MainAxisSize.min,
@@ -49,8 +51,9 @@ class CalorieRing extends StatelessWidget {
 class _RingPainter extends CustomPainter {
   final double pct;
   final bool over;
+  final bool approaching;
 
-  _RingPainter({required this.pct, required this.over});
+  _RingPainter({required this.pct, required this.over, required this.approaching});
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -67,13 +70,14 @@ class _RingPainter extends CustomPainter {
     );
 
     // Progress arc
+    final arcColor = over ? AppColors.error : approaching ? const Color(0xFFFF9800) : AppColors.primary;
     final sweepAngle = 2 * pi * pct;
     canvas.drawArc(
       Rect.fromCircle(center: center, radius: radius),
       -pi / 2, sweepAngle,
       false,
       Paint()
-        ..color = over ? AppColors.error : AppColors.primary
+        ..color = arcColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = 10
         ..strokeCap = StrokeCap.round,
@@ -81,7 +85,8 @@ class _RingPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _RingPainter old) => old.pct != pct;
+  bool shouldRepaint(covariant _RingPainter old) =>
+      old.pct != pct || old.over != over || old.approaching != approaching;
 }
 
 class MacroBar extends StatelessWidget {

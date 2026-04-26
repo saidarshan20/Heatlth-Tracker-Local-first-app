@@ -86,11 +86,14 @@ Rules:
 - Odia food refs: Pakhala 60kcal/100g, Dalma 120kcal/katori, Chakuli pitha 120kcal/piece, Chungdi malai 180kcal/katori
 - Common: Roti 80kcal, Paratha 175kcal, Puri 130kcal, Chapati 70kcal
 - Use COOKED weights. Assume 1 tsp oil/ghee per dish if not specified.
-- For mixed meals, sum each component separately.
+- IMPORTANT: If multiple items are mentioned (with +, comma, "and", or "with"), calculate ALL items and return their COMBINED total. Never ignore any item.
 - Do NOT overestimate protein for vegetarian items.
 
-Return ONLY this JSON (no markdown, no extra text):
-{"item": "<name>", "calories": <int>, "protein": <int>, "carbs": <int>, "fats": <int>}''';
+Example: "3 idli + 1 katori dal" → {"item":"3 Idli + Dal","calories":360,"protein":12,"carbs":65,"fats":4}
+Example: "2 roti and sabzi" → {"item":"2 Roti + Sabzi","calories":310,"protein":9,"carbs":52,"fats":8}
+
+Return ONLY this single JSON object with the COMBINED total of ALL mentioned items (no markdown):
+{"item":"<combined name>","calories":<int>,"protein":<int>,"carbs":<int>,"fats":<int>}''';
 
     final text = await _generate(prompt, json: true, temp: 0.1);
     if (text == null) return null;

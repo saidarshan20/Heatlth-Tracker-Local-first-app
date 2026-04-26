@@ -55,6 +55,7 @@ class DashboardProvider extends ChangeNotifier {
 
   Future<void> addWater(int ml) async {
     await DatabaseService.addWater(today, ml);
+    await NotificationService.suppressUpcomingWaterReminder();
     await refresh();
   }
 
@@ -73,6 +74,7 @@ class DashboardProvider extends ChangeNotifier {
 
   Future<void> addFood(String item, int cal, int p, int c, int f) async {
     await DatabaseService.addFood(today, item, cal, p, c, f);
+    await NotificationService.suppressMealReminderIfKeyword(item);
     await refresh();
   }
 
