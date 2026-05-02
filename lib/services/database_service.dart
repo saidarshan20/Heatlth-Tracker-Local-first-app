@@ -38,7 +38,7 @@ class DatabaseService {
       print("Opening existing database");
     }
 
-    return await openDatabase(path, version: 3, onCreate: _create, onUpgrade: _upgrade);
+    return await openDatabase(path, version: 5, onCreate: _create, onUpgrade: _upgrade);
   }
 
   static Future<void> _create(Database db, int version) async {
@@ -134,6 +134,30 @@ class DatabaseService {
         active INTEGER DEFAULT 1
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS user_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS sleep_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        start_time TEXT NOT NULL,
+        end_time TEXT,
+        duration_min INTEGER
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS suppressed_notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        notif_id INTEGER NOT NULL,
+        date TEXT NOT NULL
+      )
+    ''');
   }
 
   static Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -152,6 +176,37 @@ class DatabaseService {
             hour INTEGER NOT NULL,
             minute INTEGER NOT NULL,
             active INTEGER DEFAULT 1
+          )
+        ''');
+      } catch (_) {}
+    }
+    if (oldVersion < 4) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS suppressed_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            notif_id INTEGER NOT NULL,
+            date TEXT NOT NULL
+          )
+        ''');
+      } catch (_) {}
+    }
+    if (oldVersion < 5) {
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS user_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+          )
+        ''');
+      } catch (_) {}
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS sleep_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            start_time TEXT NOT NULL,
+            end_time TEXT,
+            duration_min INTEGER
           )
         ''');
       } catch (_) {}
@@ -557,6 +612,120 @@ class DatabaseService {
       'avgProt': dailyProts.reduce((a, b) => a + b) ~/ 7,
       'avgWater': dailyWaters.reduce((a, b) => a + b) ~/ 7,
     };
+  }
+
+  // ── Notification Suppression ──
+
+  /// Persists that [notifId] has been suppressed today so [rescheduleAll] can
+  /// respect it across app restarts. The row expires automatically when the
+  /// calendar date changes (see [clearExpiredSuppressions]).
+  static Future<void> suppressNotifForToday(int notifId) async {
+    final db = await database;
+    final today = DateTime.now();
+    final dateStr =
+        '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    // Avoid duplicates
+    final existing = await db.query(
+      'suppressed_notifications',
+      where: 'notif_id = ? AND date = ?',
+      whereArgs: [notifId, dateStr],
+    );
+    if (existing.isEmpty) {
+      await db.insert(
+          'suppressed_notifications', {'notif_id': notifId, 'date': dateStr});
+    }
+  }
+
+  /// Returns true if [notifId] has been suppressed today.
+  static Future<bool> isNotifSuppressedToday(int notifId) async {
+    final db = await database;
+    final today = DateTime.now();
+    final dateStr =
+        '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    final r = await db.query(
+      'suppressed_notifications',
+      where: 'notif_id = ? AND date = ?',
+      whereArgs: [notifId, dateStr],
+    );
+    return r.isNotEmpty;
+  }
+
+  /// Deletes suppression rows from previous days. Call at the start of
+  /// [rescheduleAll] so that yesterday's suppressions don't carry forward.
+  static Future<void> clearExpiredSuppressions() async {
+    final db = await database;
+    final today = DateTime.now();
+    final dateStr =
+        '${today.year}-${today.month.toString().padLeft(2, '0')}-${today.day.toString().padLeft(2, '0')}';
+    await db.delete(
+      'suppressed_notifications',
+      where: 'date != ?',
+      whereArgs: [dateStr],
+    );
+  }
+
+  // ── User Settings (key-value) ──
+  static Future<String?> getSetting(String key) async {
+    final db = await database;
+    final r = await db.query('user_settings', where: 'key = ?', whereArgs: [key], limit: 1);
+    return r.isNotEmpty ? r.first['value'] as String : null;
+  }
+
+  static Future<void> setSetting(String key, String value) async {
+    final db = await database;
+    await db.insert('user_settings', {'key': key, 'value': value},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  static Future<int> getSettingInt(String key, int defaultValue) async {
+    final v = await getSetting(key);
+    return v != null ? (int.tryParse(v) ?? defaultValue) : defaultValue;
+  }
+
+  static Future<double> getSettingDouble(String key, double defaultValue) async {
+    final v = await getSetting(key);
+    return v != null ? (double.tryParse(v) ?? defaultValue) : defaultValue;
+  }
+
+  static Future<bool> getSettingBool(String key, bool defaultValue) async {
+    final v = await getSetting(key);
+    return v != null ? v == '1' : defaultValue;
+  }
+
+  static Future<void> setSettingBool(String key, bool value) async {
+    await setSetting(key, value ? '1' : '0');
+  }
+
+  // ── Sleep ──
+  static Future<Map<String, dynamic>?> getActiveSleep() async {
+    final db = await database;
+    final r = await db.query('sleep_logs', where: 'end_time IS NULL', limit: 1);
+    return r.isNotEmpty ? r.first : null;
+  }
+
+  static Future<int> startSleep(String startTime) async {
+    final db = await database;
+    return await db.insert('sleep_logs', {'start_time': startTime});
+  }
+
+  static Future<void> endSleep(int id, String endTime, int durationMin) async {
+    final db = await database;
+    await db.update('sleep_logs', {'end_time': endTime, 'duration_min': durationMin},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<List<Map<String, dynamic>>> getSleepHistory({int limit = 30}) async {
+    final db = await database;
+    return await db.query('sleep_logs',
+        where: 'end_time IS NOT NULL',
+        orderBy: 'id DESC',
+        limit: limit);
+  }
+
+  static Future<Map<String, dynamic>?> getLastSleep() async {
+    final db = await database;
+    final r = await db.query('sleep_logs', where: 'end_time IS NOT NULL', orderBy: 'id DESC', limit: 1);
+    return r.isNotEmpty ? r.first : null;
   }
 
   // ── Reminders ──

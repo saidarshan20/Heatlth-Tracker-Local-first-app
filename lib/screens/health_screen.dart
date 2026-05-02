@@ -21,6 +21,12 @@ class _HealthScreenState extends State<HealthScreen> {
   Timer? _fastTimer;
   Duration _elapsed = Duration.zero;
 
+  // Sleep tracking
+  Map<String, dynamic>? _activeSleep;
+  Timer? _sleepTimer;
+  Duration _sleepElapsed = Duration.zero;
+  bool _medsExpanded = false;
+
   @override
   void initState() {
     super.initState();
@@ -30,17 +36,25 @@ class _HealthScreenState extends State<HealthScreen> {
   @override
   void dispose() {
     _fastTimer?.cancel();
+    _sleepTimer?.cancel();
     super.dispose();
   }
 
   Future<void> _loadData() async {
     _activeFast = await DatabaseService.getActiveFast();
     _weights = await DatabaseService.getWeightHistory();
+    _activeSleep = await DatabaseService.getActiveSleep();
     if (_activeFast != null) {
       _startTimer();
       // Resume the live notification if a fast was already running
       final start = DateTime.parse(_activeFast!['start_time']);
       await NotificationService.showFastingNotification(start);
+    }
+    if (_activeSleep != null) {
+      _startSleepTimer();
+      // Resume the live notification if sleep was already running
+      final sleepStart = DateTime.parse(_activeSleep!['start_time']);
+      await NotificationService.showSleepNotification(sleepStart);
     }
     if (mounted) setState(() {});
   }
@@ -69,7 +83,7 @@ class _HealthScreenState extends State<HealthScreen> {
 
   Future<void> _startFast() async {
     await DatabaseService.startFast(DateTime.now().toIso8601String());
-    await NotificationService.rescheduleAll(); // cancels meal notifs while fast is active
+    await NotificationService.rescheduleAll(force: true); // cancels meal notifs while fast is active
     await _loadData();
     // Show the live notification immediately
     if (_activeFast != null) {
@@ -85,7 +99,7 @@ class _HealthScreenState extends State<HealthScreen> {
     await DatabaseService.endFast(_activeFast!['id'] as int, DateTime.now().toIso8601String(), dur);
     _fastTimer?.cancel();
     await NotificationService.cancelFastingNotification();
-    await NotificationService.rescheduleAll(); // restores meal notifs after fast ends
+    await NotificationService.rescheduleAll(force: true); // restores meal notifs after fast ends
     setState(() { _activeFast = null; _elapsed = Duration.zero; });
     await _loadData();
     if (mounted) {
@@ -106,6 +120,66 @@ class _HealthScreenState extends State<HealthScreen> {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _FastingHistorySheet(history: history),
+    );
+  }
+
+  // ── Sleep methods ──
+  int _sleepNotifTickCount = 0;
+
+  void _startSleepTimer() {
+    _sleepTimer?.cancel();
+    _sleepNotifTickCount = 0;
+    _sleepTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_activeSleep == null) return;
+      final start = DateTime.parse(_activeSleep!['start_time']);
+      setState(() { _sleepElapsed = DateTime.now().difference(start); });
+      // Refresh the live notification every 60 seconds
+      _sleepNotifTickCount++;
+      if (_sleepNotifTickCount % 60 == 0) {
+        NotificationService.showSleepNotification(start);
+      }
+    });
+    if (_activeSleep != null) {
+      final start = DateTime.parse(_activeSleep!['start_time']);
+      setState(() { _sleepElapsed = DateTime.now().difference(start); });
+    }
+  }
+
+  Future<void> _startSleep() async {
+    await DatabaseService.startSleep(DateTime.now().toIso8601String());
+    await _loadData();
+    // Show the live notification immediately
+    if (_activeSleep != null) {
+      final start = DateTime.parse(_activeSleep!['start_time']);
+      await NotificationService.showSleepNotification(start);
+    }
+  }
+
+  Future<void> _endSleep() async {
+    if (_activeSleep == null) return;
+    final start = DateTime.parse(_activeSleep!['start_time']);
+    final dur = DateTime.now().difference(start).inMinutes;
+    await DatabaseService.endSleep(_activeSleep!['id'] as int, DateTime.now().toIso8601String(), dur);
+    _sleepTimer?.cancel();
+    await NotificationService.cancelSleepNotification();
+    setState(() { _activeSleep = null; _sleepElapsed = Duration.zero; });
+    await _loadData();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('😴 Sleep ended! Duration: ${dur ~/ 60}h ${dur % 60}m')),
+      );
+      _showSleepHistory();
+    }
+  }
+
+  Future<void> _showSleepHistory() async {
+    final history = await DatabaseService.getSleepHistory();
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => _SleepHistorySheet(history: history),
     );
   }
 
@@ -252,52 +326,85 @@ class _HealthScreenState extends State<HealthScreen> {
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
           children: [
             const Text('Health', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
-            const Text('Medicines · Fasting · Weight', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+            const Text('Medicines · Fasting · Sleep · Weight', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
             const SizedBox(height: 16),
 
-            // ── Medicines ──
+            // ── Medicines (Compact) ──
             AppCard(
               child: Column(
                 children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('💊 Medicines', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                      TextButton(
-                        onPressed: _showAddMedicineDialog,
-                        child: const Text('+ Add', style: TextStyle(fontSize: 11, color: AppColors.primary)),
-                      ),
-                    ],
+                  InkWell(
+                    onTap: () => setState(() => _medsExpanded = !_medsExpanded),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            const Text('💊 Medicines', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                            const SizedBox(width: 8),
+                            if (dash.medicines.isNotEmpty)
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                decoration: BoxDecoration(
+                                  color: AppColors.primary.withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(99),
+                                ),
+                                child: Text(
+                                  '${dash.medicines.where((m) => dash.isMedTaken(m['id'] as int)).length}/${dash.medicines.length} taken',
+                                  style: const TextStyle(fontSize: 9, color: AppColors.primary, fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                          ],
+                        ),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            TextButton(
+                              onPressed: _showAddMedicineDialog,
+                              child: const Text('+ Add', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                            ),
+                            Icon(
+                              _medsExpanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                              size: 20, color: AppColors.onSurfaceVariant,
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
-                  if (dash.medicines.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.symmetric(vertical: 8),
-                      child: Text('No medicines added yet.', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
-                    ),
-                  ...dash.medicines.map((m) => Dismissible(
-                    key: ValueKey('med_${m['id']}'),
-                    direction: DismissDirection.endToStart,
-                    background: Container(
-                      alignment: Alignment.centerRight,
-                      padding: const EdgeInsets.only(right: 20),
-                      child: const Icon(Icons.delete_outline, color: AppColors.error),
-                    ),
-                    onDismissed: (_) => dash.deleteMedicine(m['id'] as int),
-                    child: MedicineRow(
-                      time: m['reminder_time'] as String,
-                      name: m['name'] as String,
-                      emoji: dash.getMedEmoji(m['type'] as String? ?? 'tablet'),
-                      taken: dash.isMedTaken(m['id'] as int),
-                      onTap: () async {
-                        await dash.takeMedicine(m['id'] as int);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('✅ ${m['name']} taken! 💧 +250ml water logged.')),
-                          );
-                        }
-                      },
-                    ),
-                  )),
+                  if (_medsExpanded) ...[
+                    const SizedBox(height: 4),
+                    if (dash.medicines.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: Text('No medicines added yet.', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                      ),
+                    ...dash.medicines.map((m) => Dismissible(
+                      key: ValueKey('med_${m['id']}'),
+                      direction: DismissDirection.endToStart,
+                      background: Container(
+                        alignment: Alignment.centerRight,
+                        padding: const EdgeInsets.only(right: 20),
+                        child: const Icon(Icons.delete_outline, color: AppColors.error),
+                      ),
+                      onDismissed: (_) => dash.deleteMedicine(m['id'] as int),
+                      child: MedicineRow(
+                        time: m['reminder_time'] as String,
+                        name: m['name'] as String,
+                        emoji: dash.getMedEmoji(m['type'] as String? ?? 'tablet'),
+                        taken: dash.isMedTaken(m['id'] as int),
+                        onTap: () async {
+                          await dash.takeMedicine(m['id'] as int);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('✅ ${m['name']} taken! 💧 +250ml water logged.')),
+                            );
+                          }
+                        },
+                      ),
+                    )),
+                  ],
                 ],
               ),
             ),
@@ -368,6 +475,85 @@ class _HealthScreenState extends State<HealthScreen> {
                         onPressed: _startFast,
                         style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
                         child: const Text('Start Fast'),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            // ── Sleep Tracker (below Fasting) ──
+            AppCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('😴 Sleep Tracker', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                      TextButton(
+                        onPressed: _showSleepHistory,
+                        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                        child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  if (_activeSleep != null) ...[
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        _fastStat('${_sleepElapsed.inHours}:${(_sleepElapsed.inMinutes % 60).toString().padLeft(2, '0')}', 'elapsed'),
+                        _fastStat('${(8 * 60 - _sleepElapsed.inMinutes).clamp(0, 480) ~/ 60}:${((8 * 60 - _sleepElapsed.inMinutes).clamp(0, 480) % 60).toString().padLeft(2, '0')}', 'remaining'),
+                        _fastStat('8h', 'goal'),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(99),
+                      child: LinearProgressIndicator(
+                        value: (_sleepElapsed.inMinutes / (8 * 60)).clamp(0.0, 1.0),
+                        minHeight: 6,
+                        backgroundColor: AppColors.surfaceContainerHigh,
+                        valueColor: const AlwaysStoppedAnimation(Color(0xFF7B68EE)),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Builder(builder: (ctx) {
+                      final startTime = DateTime.parse(_activeSleep!['start_time']);
+                      final h = startTime.hour % 12 == 0 ? 12 : startTime.hour % 12;
+                      final m = startTime.minute.toString().padLeft(2, '0');
+                      final ampm = startTime.hour < 12 ? 'AM' : 'PM';
+                      return Text(
+                        'Went to bed at $h:$m $ampm',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                      );
+                    }),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton(
+                        onPressed: _endSleep,
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Color(0xFF7B68EE)),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        child: const Text('🌅 Woke Up', style: TextStyle(color: Color(0xFF7B68EE))),
+                      ),
+                    ),
+                  ] else ...[
+                    const Text('No active sleep session.', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _startSleep,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF7B68EE),
+                          foregroundColor: AppColors.surface,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        ),
+                        child: const Text('🌙 Going to Sleep'),
                       ),
                     ),
                   ],
@@ -816,6 +1002,151 @@ class _FastingHistorySheet extends StatelessWidget {
             Text(label, style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant)),
             const SizedBox(height: 2),
             Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// Sleep History Bottom Sheet
+// ─────────────────────────────────────────────
+class _SleepHistorySheet extends StatelessWidget {
+  final List<Map<String, dynamic>> history;
+  const _SleepHistorySheet({required this.history});
+
+  static const int _goalMinutes = 8 * 60;
+
+  String _fmt(int minutes) {
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return m == 0 ? '${h}h' : '${h}h ${m}m';
+  }
+
+  String _fmtDate(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      return '${dt.day} ${months[dt.month - 1]}';
+    } catch (_) { return ''; }
+  }
+
+  String _fmtTime(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final m = dt.minute.toString().padLeft(2, '0');
+      final ampm = dt.hour < 12 ? 'AM' : 'PM';
+      return '$h:$m $ampm';
+    } catch (_) { return ''; }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65,
+      minChildSize: 0.35,
+      maxChildSize: 0.9,
+      expand: false,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surfaceContainer,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Container(width: 36, height: 4, decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99))),
+            ),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  Text('😴 Sleep History', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: AppColors.outline),
+            Expanded(
+              child: history.isEmpty
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('😴', style: TextStyle(fontSize: 40)),
+                          SizedBox(height: 8),
+                          Text('No sleep logged yet.', style: TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                      itemCount: history.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) {
+                        final s = history[i];
+                        final durMin = (s['duration_min'] as int?) ?? 0;
+                        final goalMet = durMin >= _goalMinutes;
+                        final progress = (durMin / _goalMinutes).clamp(0.0, 1.0);
+                        final dateLabel = _fmtDate(s['start_time'] as String);
+                        final startLabel = _fmtTime(s['start_time'] as String);
+                        final endLabel = _fmtTime(s['end_time'] as String);
+
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(16),
+                            border: goalMet ? Border.all(color: const Color(0xFF7B68EE).withValues(alpha: 0.4), width: 1) : null,
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Text(dateLabel, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: goalMet ? const Color(0xFF7B68EE).withValues(alpha: 0.15) : AppColors.surfaceContainer,
+                                      borderRadius: BorderRadius.circular(99),
+                                    ),
+                                    child: Text(
+                                      goalMet ? '🎯 8h+ reached' : '⏱ ${_fmt(durMin)}',
+                                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: goalMet ? const Color(0xFF7B68EE) : AppColors.onSurfaceVariant),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              Row(
+                                children: [
+                                  Text(_fmt(durMin), style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: goalMet ? const Color(0xFF7B68EE) : AppColors.onSurface)),
+                                  const SizedBox(width: 10),
+                                  Text('$startLabel → $endLabel', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                                ],
+                              ),
+                              const SizedBox(height: 8),
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(99),
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 5,
+                                  backgroundColor: AppColors.surfaceContainer,
+                                  valueColor: AlwaysStoppedAnimation(goalMet ? const Color(0xFF7B68EE) : AppColors.onSurfaceVariant),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
           ],
         ),
       ),

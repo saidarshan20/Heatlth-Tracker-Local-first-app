@@ -107,6 +107,7 @@ class _AppShellState extends State<AppShell> {
                               (estimate!['protein'] as num).toInt(),
                               (estimate!['carbs'] as num).toInt(),
                               (estimate!['fats'] as num).toInt(),
+                              rawInput: ctrl.text.trim(),
                             );
                             if (ctx.mounted) Navigator.pop(ctx);
                             if (mounted) {

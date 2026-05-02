@@ -21,6 +21,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
   bool _loadingPlan = false;
   final _planCtrl = TextEditingController();
 
+  // BMI
+  double? _bmi;
+  double? _heightCm;
+  double? _latestWeight;
+
   @override
   void initState() {
     super.initState();
@@ -36,7 +41,25 @@ class _ReportsScreenState extends State<ReportsScreen> {
   Future<void> _load() async {
     final stats = await DatabaseService.getWeeklyStats();
     final streak = await DatabaseService.getMedicineStreak();
-    setState(() { _stats = stats; _medStreak = streak; });
+
+    // BMI calculation
+    final h = await DatabaseService.getSettingDouble('height_cm', 0);
+    final weights = await DatabaseService.getWeightHistory();
+    double? bmi;
+    double? latestW;
+    if (h > 0 && weights.isNotEmpty) {
+      latestW = (weights.first['weight_kg'] as num).toDouble();
+      final hm = h / 100; // convert cm to meters
+      bmi = latestW / (hm * hm); // Standard WHO BMI formula
+    }
+
+    setState(() {
+      _stats = stats;
+      _medStreak = streak;
+      _heightCm = h > 0 ? h : null;
+      _latestWeight = latestW;
+      _bmi = bmi;
+    });
   }
 
   Future<void> _getAIInsights() async {
@@ -180,6 +203,70 @@ class _ReportsScreenState extends State<ReportsScreen> {
           ],
         ),
 
+        // ── BMI Card ──
+        if (_bmi != null) AppCard(
+          child: Row(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('📐 Body Mass Index', style: TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        _bmi!.toStringAsFixed(1),
+                        style: TextStyle(
+                          fontSize: 28, fontWeight: FontWeight.w800,
+                          color: _bmiColor(_bmi!),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 4),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: _bmiColor(_bmi!).withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(99),
+                          ),
+                          child: Text(
+                            _bmiLabel(_bmi!),
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _bmiColor(_bmi!)),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text('${_latestWeight?.toStringAsFixed(1) ?? '?'} kg', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                  Text('${_heightCm?.toStringAsFixed(0) ?? '?'} cm', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                ],
+              ),
+            ],
+          ),
+        )
+        else if (_heightCm == null) AppCard(
+          child: Row(
+            children: [
+              const Text('📐', style: TextStyle(fontSize: 20)),
+              const SizedBox(width: 10),
+              const Expanded(
+                child: Text(
+                  'Set your height in Settings → Goals to see BMI',
+                  style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+        ),
+
         // ── AI Insights ──
         AppCard(
           child: Column(
@@ -255,6 +342,20 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
   String _formatDate(DateTime d) => '${_months[d.month - 1]} ${d.day}';
   static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  Color _bmiColor(double bmi) {
+    if (bmi < 18.5) return const Color(0xFF42A5F5); // Underweight - blue
+    if (bmi < 25.0) return AppColors.primary;        // Normal - green
+    if (bmi < 30.0) return AppColors.warning;        // Overweight - amber
+    return AppColors.error;                           // Obese - red
+  }
+
+  String _bmiLabel(double bmi) {
+    if (bmi < 18.5) return 'Underweight';
+    if (bmi < 25.0) return 'Normal';
+    if (bmi < 30.0) return 'Overweight';
+    return 'Obese';
+  }
 }
 
 

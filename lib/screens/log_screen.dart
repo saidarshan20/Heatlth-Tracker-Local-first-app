@@ -59,6 +59,7 @@ class _LogScreenState extends State<LogScreen> with SingleTickerProviderStateMix
       (_aiEstimate!['protein'] as num).toInt(),
       (_aiEstimate!['carbs'] as num).toInt(),
       (_aiEstimate!['fats'] as num).toInt(),
+      rawInput: _aiCtrl.text.trim(),
     );
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(

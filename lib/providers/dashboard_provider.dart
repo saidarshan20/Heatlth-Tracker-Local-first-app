@@ -4,12 +4,24 @@ import '../services/database_service.dart';
 import '../services/notification_service.dart';
 
 class DashboardProvider extends ChangeNotifier {
-  // Goals
-  static const int calGoal = 1800;
-  static const int protGoal = 120;
-  static const int carbGoal = 200;
-  static const int fatGoal = 60;
-  static const int waterGoal = 3000;
+  // Goals — loaded from DB, these are the defaults
+  static int calGoal = 1800;
+  static int protGoal = 120;
+  static int carbGoal = 200;
+  static int fatGoal = 60;
+  static int waterGoal = 3000;
+
+  static bool _goalsLoaded = false;
+
+  /// Loads goals from the database. Call once at startup.
+  static Future<void> loadGoals() async {
+    calGoal = await DatabaseService.getSettingInt('cal_goal', 1800);
+    protGoal = await DatabaseService.getSettingInt('prot_goal', 120);
+    carbGoal = await DatabaseService.getSettingInt('carb_goal', 200);
+    fatGoal = await DatabaseService.getSettingInt('fat_goal', 60);
+    waterGoal = await DatabaseService.getSettingInt('water_goal', 3000);
+    _goalsLoaded = true;
+  }
 
   int totalCal = 0, totalProt = 0, totalCarb = 0, totalFat = 0;
   int totalWater = 0;
@@ -34,6 +46,8 @@ class DashboardProvider extends ChangeNotifier {
   String get dateLabel => DateFormat('EEEE, d MMMM').format(DateTime.now());
 
   Future<void> refresh() async {
+    if (!_goalsLoaded) await loadGoals();
+
     final totals = await DatabaseService.getFoodTotals(today);
     totalCal = totals['cal']!;
     totalProt = totals['p']!;
@@ -72,9 +86,9 @@ class DashboardProvider extends ChangeNotifier {
     await refresh();
   }
 
-  Future<void> addFood(String item, int cal, int p, int c, int f) async {
+  Future<void> addFood(String item, int cal, int p, int c, int f, {String? rawInput}) async {
     await DatabaseService.addFood(today, item, cal, p, c, f);
-    await NotificationService.suppressMealReminderIfKeyword(item);
+    await NotificationService.suppressMealReminderIfKeyword(item, rawInput: rawInput);
     await refresh();
   }
 
@@ -114,6 +128,9 @@ class DashboardProvider extends ChangeNotifier {
         );
       }
     }
+    // Persist suppression so rescheduleAll() on next app restart keeps this
+    // alarm on tomorrow (not re-added for today)
+    await DatabaseService.suppressNotifForToday(notifId);
 
     await refresh();
   }

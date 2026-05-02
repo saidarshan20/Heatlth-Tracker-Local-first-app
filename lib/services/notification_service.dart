@@ -124,7 +124,9 @@ class NotificationService {
         ),
       ),
       androidScheduleMode: AndroidScheduleMode.alarmClock,
-      matchDateTimeComponents: DateTimeComponents.time,
+      // NO matchDateTimeComponents — this is a one-shot for tomorrow only.
+      // The next rescheduleAll() (on app startup or midnight rollover) will
+      // re-create the daily-repeating alarm via scheduleDailyNotification().
     );
   }
 
@@ -179,7 +181,7 @@ class NotificationService {
       id: fastingNotificationId,
       title: '⚡ Fasting — $elapsedStr elapsed',
       body: '$bar  $remainingStr',
-      notificationDetails: const NotificationDetails(
+      notificationDetails: NotificationDetails(
         android: AndroidNotificationDetails(
           'health_tracker_fasting',
           'Fasting Tracker',
@@ -189,7 +191,9 @@ class NotificationService {
           icon: '@mipmap/launcher_icon',
           ongoing: true,                  // can't be swiped away
           autoCancel: false,
-          showWhen: false,                // hide timestamp – we have our own timer
+          showWhen: true,                 // required for chronometer
+          when: startTime.millisecondsSinceEpoch,
+          usesChronometer: true,          // native OS background ticking
           onlyAlertOnce: true,            // don't buzz on every update
           playSound: false,
           enableVibration: false,
@@ -201,6 +205,57 @@ class NotificationService {
   /// Cancels the live fasting notification when the fast ends.
   static Future<void> cancelFastingNotification() async {
     await _plugin.cancel(id: fastingNotificationId);
+  }
+
+  // ── Sleep Tracker Notification ──
+  static const int sleepNotificationId = 8999;
+
+  /// Shows (or updates) a persistent live-sleep notification.
+  /// Call this once when sleep starts, and again periodically to refresh the timer.
+  static Future<void> showSleepNotification(DateTime startTime) async {
+    final elapsed = DateTime.now().difference(startTime);
+    final goalMinutes = 8 * 60;
+    final remaining = Duration(minutes: (goalMinutes - elapsed.inMinutes).clamp(0, goalMinutes));
+    final progress = (elapsed.inMinutes / goalMinutes).clamp(0.0, 1.0);
+
+    final elapsedStr =
+        '${elapsed.inHours}h ${(elapsed.inMinutes % 60).toString().padLeft(2, '0')}m';
+    final remainingStr = elapsed.inMinutes >= goalMinutes
+        ? '🎉 8h goal reached!'
+        : '${remaining.inHours}h ${(remaining.inMinutes % 60).toString().padLeft(2, '0')}m left';
+
+    // Build a simple ASCII progress bar (10 chars)
+    final filled = (progress * 10).round();
+    final bar = '${'█' * filled}${'░' * (10 - filled)}';
+
+    await _plugin.show(
+      id: sleepNotificationId,
+      title: '😴 Sleeping — $elapsedStr',
+      body: '$bar  $remainingStr',
+      notificationDetails: NotificationDetails(
+        android: AndroidNotificationDetails(
+          'health_tracker_sleep',
+          'Sleep Tracker',
+          channelDescription: 'Live sleep progress notification',
+          importance: Importance.low,
+          priority: Priority.low,
+          icon: '@mipmap/launcher_icon',
+          ongoing: true,
+          autoCancel: false,
+          showWhen: true,                 // required for chronometer
+          when: startTime.millisecondsSinceEpoch,
+          usesChronometer: true,          // native OS background ticking
+          onlyAlertOnce: true,
+          playSound: false,
+          enableVibration: false,
+        ),
+      ),
+    );
+  }
+
+  /// Cancels the live sleep notification when sleep ends.
+  static Future<void> cancelSleepNotification() async {
+    await _plugin.cancel(id: sleepNotificationId);
   }
 
   // Reserved ID for the weekly weight reminder
@@ -247,6 +302,70 @@ class NotificationService {
     await _plugin.cancel(id: weightReminderNotifId);
   }
 
+  // Reserved ID for daily summary notification
+  static const int summaryNotifId = 9001;
+
+  /// Schedules (or reschedules) the daily summary notification.
+  /// Reads config from DB: summary_enabled, summary_hour, summary_minute.
+  static Future<void> scheduleDailySummaryIfEnabled() async {
+    final enabled = await DatabaseService.getSettingBool('summary_enabled', false);
+    if (!enabled) {
+      await _plugin.cancel(id: summaryNotifId);
+      return;
+    }
+
+    final hour = await DatabaseService.getSettingInt('summary_hour', 9);
+    final minute = await DatabaseService.getSettingInt('summary_minute', 0);
+
+    // Build yesterday's summary
+    final yesterday = DateTime.now().subtract(const Duration(days: 1));
+    final yStr = '${yesterday.year}-${yesterday.month.toString().padLeft(2, '0')}-${yesterday.day.toString().padLeft(2, '0')}';
+
+    final foodTotals = await DatabaseService.getFoodTotals(yStr);
+    final waterTotal = await DatabaseService.getWaterTotal(yStr);
+    final cal = foodTotals['cal'] ?? 0;
+    final prot = foodTotals['p'] ?? 0;
+    final waterL = (waterTotal / 1000).toStringAsFixed(1);
+
+    String body = '🔥 $cal kcal · P:${prot}g · 💧 ${waterL}L';
+
+    // Check for fasting yesterday
+    final db = await DatabaseService.database;
+    final fastRows = await db.rawQuery(
+      "SELECT SUM(COALESCE(duration_min, 0)) as total FROM fasting_logs WHERE DATE(start_time) = ?",
+      [yStr],
+    );
+    final fastMin = (fastRows.first['total'] as num?)?.toInt() ?? 0;
+    if (fastMin > 0) {
+      body += ' · ⚡ ${fastMin ~/ 60}h${fastMin % 60 > 0 ? ' ${fastMin % 60}m' : ''} fast';
+    }
+
+    // Check for sleep yesterday
+    final sleepRows = await db.rawQuery(
+      "SELECT duration_min FROM sleep_logs WHERE DATE(start_time) = ? AND end_time IS NOT NULL ORDER BY id DESC LIMIT 1",
+      [yStr],
+    );
+    if (sleepRows.isNotEmpty) {
+      final sleepMin = (sleepRows.first['duration_min'] as num?)?.toInt() ?? 0;
+      if (sleepMin > 0) {
+        body += ' · 😴 ${sleepMin ~/ 60}h${sleepMin % 60 > 0 ? ' ${sleepMin % 60}m' : ''}';
+      }
+    }
+
+    await scheduleDailyNotification(
+      id: summaryNotifId,
+      title: '📋 Yesterday\'s Summary',
+      body: body,
+      hour: hour,
+      minute: minute,
+    );
+    print('Scheduled daily summary at $hour:${minute.toString().padLeft(2, '0')}');
+  }
+
+  static Future<void> cancelSummaryNotification() async {
+    await _plugin.cancel(id: summaryNotifId);
+  }
+
   static const int _waterSuppressionWindowMinutes = 20;
 
   /// After logging water, cancel any water reminder scheduled to fire within
@@ -260,7 +379,12 @@ class NotificationService {
     for (final r in reminders) {
       if ((r['active'] as int) != 1) continue;
       final rMins = (r['hour'] as int) * 60 + (r['minute'] as int);
-      if (rMins < nowMins || rMins > windowEnd) continue;
+
+      // Midnight-safe window check
+      final inWindow = windowEnd <= 1440
+          ? (rMins >= nowMins && rMins <= windowEnd)
+          : (rMins >= nowMins || rMins <= windowEnd % 1440);
+      if (!inWindow) continue;
 
       final notifId = 2000 + (r['id'] as int);
       await cancelNotification(notifId);
@@ -271,18 +395,22 @@ class NotificationService {
         hour: r['hour'] as int,
         minute: r['minute'] as int,
       );
+      // Persist suppression so rescheduleAll() respects it across app restarts
+      await DatabaseService.suppressNotifForToday(notifId);
       print('Suppressed water reminder #$notifId — water just logged');
     }
   }
 
   /// After logging food with a meal keyword (breakfast/lunch/dinner), cancel the
   /// matching meal reminder for today and reschedule from tomorrow.
-  static Future<void> suppressMealReminderIfKeyword(String foodItem) async {
+  static Future<void> suppressMealReminderIfKeyword(String foodItem, {String? rawInput}) async {
+    // Check both the AI-processed name and the user's original input for keywords
     final itemLower = foodItem.toLowerCase();
+    final rawLower = rawInput?.toLowerCase() ?? '';
     final keywords = <String>[];
-    if (itemLower.contains('breakfast')) keywords.add('breakfast');
-    if (itemLower.contains('lunch')) keywords.add('lunch');
-    if (itemLower.contains('dinner')) keywords.add('dinner');
+    if (itemLower.contains('breakfast') || rawLower.contains('breakfast')) keywords.add('breakfast');
+    if (itemLower.contains('lunch') || rawLower.contains('lunch')) keywords.add('lunch');
+    if (itemLower.contains('dinner') || rawLower.contains('dinner')) keywords.add('dinner');
     if (keywords.isEmpty) return;
 
     // Skip scheduling-from-tomorrow if a fast is active — rescheduleAll handles resumption on fast end
@@ -304,16 +432,18 @@ class NotificationService {
           minute: r['minute'] as int,
         );
       }
+      // Persist suppression so rescheduleAll() respects it across app restarts
+      await DatabaseService.suppressNotifForToday(notifId);
       print('Suppressed meal reminder #$notifId — "$foodItem" logged');
     }
   }
 
   /// Reschedule all reminders from the database
-  static Future<void> rescheduleAll() async {
+  static Future<void> rescheduleAll({bool force = false}) async {
     if (_isRescheduling) return;
     
     final now = DateTime.now();
-    if (_lastReschedule != null && now.difference(_lastReschedule!).inSeconds < 5) {
+    if (!force && _lastReschedule != null && now.difference(_lastReschedule!).inSeconds < 5) {
       print('rescheduleAll debounced');
       return;
     }
@@ -324,6 +454,9 @@ class NotificationService {
     try {
       await cancelAll(); // Clean slate to avoid duplicates or orphaned alarms
 
+      // Remove stale suppression rows from previous days
+      await DatabaseService.clearExpiredSuppressions();
+
       // Schedule medicine reminders
       final medicines = await DatabaseService.getMedicines();
       for (final med in medicines) {
@@ -332,13 +465,24 @@ class NotificationService {
           final hour = int.tryParse(parts[0]) ?? 9;
           final minute = int.tryParse(parts[1]) ?? 0;
           final medId = 1000 + (med['id'] as int);
-          await scheduleDailyNotification(
-            id: medId,
-            title: '💊 Medicine Reminder',
-            body: 'Time to take ${med['name']}',
-            hour: hour,
-            minute: minute,
-          );
+          final suppressed = await DatabaseService.isNotifSuppressedToday(medId);
+          if (suppressed) {
+            await scheduleDailyNotificationFromTomorrow(
+              id: medId,
+              title: '💊 Medicine Reminder',
+              body: 'Time to take ${med['name']}',
+              hour: hour,
+              minute: minute,
+            );
+          } else {
+            await scheduleDailyNotification(
+              id: medId,
+              title: '💊 Medicine Reminder',
+              body: 'Time to take ${med['name']}',
+              hour: hour,
+              minute: minute,
+            );
+          }
         }
       }
 
@@ -358,25 +502,50 @@ class NotificationService {
 
         if (type == 'water') {
           final waterId = 2000 + id;
-          await scheduleDailyNotification(
-            id: waterId,
-            title: '💧 Water Reminder',
-            body: label.isNotEmpty ? label : 'Time to drink some water!',
-            hour: hour,
-            minute: minute,
-          );
+          final waterSuppressed = await DatabaseService.isNotifSuppressedToday(waterId);
+          if (waterSuppressed) {
+            await scheduleDailyNotificationFromTomorrow(
+              id: waterId,
+              title: '💧 Water Reminder',
+              body: label.isNotEmpty ? label : 'Time to drink some water!',
+              hour: hour,
+              minute: minute,
+            );
+          } else {
+            await scheduleDailyNotification(
+              id: waterId,
+              title: '💧 Water Reminder',
+              body: label.isNotEmpty ? label : 'Time to drink some water!',
+              hour: hour,
+              minute: minute,
+            );
+          }
         } else if (type == 'meal') {
           if (fastIsActive) continue;
           final mealId = 3000 + id;
-          await scheduleDailyNotification(
-            id: mealId,
-            title: '🍽️ Meal Reminder',
-            body: label.isNotEmpty ? label : 'Time to log your meal!',
-            hour: hour,
-            minute: minute,
-          );
+          final mealSuppressed = await DatabaseService.isNotifSuppressedToday(mealId);
+          if (mealSuppressed) {
+            await scheduleDailyNotificationFromTomorrow(
+              id: mealId,
+              title: '🍽️ Meal Reminder',
+              body: label.isNotEmpty ? label : 'Time to log your meal!',
+              hour: hour,
+              minute: minute,
+            );
+          } else {
+            await scheduleDailyNotification(
+              id: mealId,
+              title: '🍽️ Meal Reminder',
+              body: label.isNotEmpty ? label : 'Time to log your meal!',
+              hour: hour,
+              minute: minute,
+            );
+          }
         }
       }
+
+      // Schedule daily summary notification if enabled
+      await scheduleDailySummaryIfEnabled();
 
       print('Rescheduled ${medicines.length} medicine + ${reminders.where((r) => (r['active'] as int) == 1).length} other reminders');
     } finally {
