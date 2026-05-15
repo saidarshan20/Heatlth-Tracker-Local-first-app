@@ -2,6 +2,62 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import '../theme/app_theme.dart';
 
+/// One-shot animated water bar. Same vibe as the calorie ring — fills from
+/// 0 → target on mount with a smooth easeOutCubic / 600ms tween, then sits
+/// still. No wiggles, no waves; just a clean bar with a subtle gradient.
+class WaterWave extends StatelessWidget {
+  final double value; // 0..1
+  final double height;
+  final Color color;
+  final Color background;
+
+  const WaterWave({
+    super.key,
+    required this.value,
+    this.height = 10,
+    this.color = AppColors.water,
+    this.background = AppColors.surfaceContainerHigh,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final target = value.clamp(0.0, 1.0);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(99),
+      child: SizedBox(
+        height: height,
+        width: double.infinity,
+        child: LayoutBuilder(
+          builder: (_, c) => TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: target),
+            duration: const Duration(milliseconds: 700),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, _) => Stack(
+              alignment: Alignment.centerLeft,
+              children: [
+                Container(color: background),
+                Container(
+                  width: c.maxWidth * v,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.centerLeft,
+                      end: Alignment.centerRight,
+                      colors: [
+                        color.withValues(alpha: 0.85),
+                        color,
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class CalorieRing extends StatelessWidget {
   final int consumed;
   final int goal;
@@ -21,19 +77,30 @@ class CalorieRing extends StatelessWidget {
       child: Stack(
         alignment: Alignment.center,
         children: [
-          CustomPaint(
-            size: Size(size, size),
-            painter: _RingPainter(pct: pct, over: over, approaching: approaching),
+          // Smoothly tween the arc when the value changes (e.g. after logging food).
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: pct),
+            duration: const Duration(milliseconds: 600),
+            curve: Curves.easeOutCubic,
+            builder: (_, value, _) => CustomPaint(
+              size: Size(size, size),
+              painter: _RingPainter(pct: value, over: over, approaching: approaching),
+            ),
           ),
           Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                '$consumed',
-                style: TextStyle(
-                  fontSize: size * 0.16,
-                  fontWeight: FontWeight.w700,
-                  color: over ? AppColors.error : AppColors.onSurface,
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                transitionBuilder: (child, anim) => FadeTransition(opacity: anim, child: child),
+                child: Text(
+                  '$consumed',
+                  key: ValueKey(consumed),
+                  style: TextStyle(
+                    fontSize: size * 0.16,
+                    fontWeight: FontWeight.w700,
+                    color: over ? AppColors.error : AppColors.onSurface,
+                  ),
                 ),
               ),
               Text(

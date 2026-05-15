@@ -1,6 +1,7 @@
 // ignore_for_file: avoid_print, unnecessary_string_interpolations
 import 'dart:convert';
 import 'dart:io';
+import 'package:excel/excel.dart' as xl;
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' show join, dirname;
 import 'package:path_provider/path_provider.dart';
@@ -38,7 +39,7 @@ class DatabaseService {
       print("Opening existing database");
     }
 
-    return await openDatabase(path, version: 5, onCreate: _create, onUpgrade: _upgrade);
+    return await openDatabase(path, version: 6, onCreate: _create, onUpgrade: _upgrade);
   }
 
   static Future<void> _create(Database db, int version) async {
@@ -61,6 +62,7 @@ class DatabaseService {
         date TEXT NOT NULL,
         ml INTEGER NOT NULL,
         type TEXT DEFAULT 'water',
+        drink_name TEXT,
         created_at TEXT DEFAULT (datetime('now'))
       )
     ''');
@@ -158,6 +160,19 @@ class DatabaseService {
         date TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pinned_meals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        calories INTEGER NOT NULL,
+        protein INTEGER DEFAULT 0,
+        carbs INTEGER DEFAULT 0,
+        fats INTEGER DEFAULT 0,
+        position INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now'))
+      )
+    ''');
   }
 
   static Future<void> _upgrade(Database db, int oldVersion, int newVersion) async {
@@ -207,6 +222,25 @@ class DatabaseService {
             start_time TEXT NOT NULL,
             end_time TEXT,
             duration_min INTEGER
+          )
+        ''');
+      } catch (_) {}
+    }
+    if (oldVersion < 6) {
+      try {
+        await db.execute("ALTER TABLE water_logs ADD COLUMN drink_name TEXT");
+      } catch (_) {}
+      try {
+        await db.execute('''
+          CREATE TABLE IF NOT EXISTS pinned_meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            calories INTEGER NOT NULL,
+            protein INTEGER DEFAULT 0,
+            carbs INTEGER DEFAULT 0,
+            fats INTEGER DEFAULT 0,
+            position INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now'))
           )
         ''');
       } catch (_) {}
@@ -352,9 +386,11 @@ class DatabaseService {
 
 
   // ── Water ──
-  static Future<int> addWater(String date, int ml, {String type = 'water'}) async {
+  static Future<int> addWater(String date, int ml, {String type = 'water', String? drinkName}) async {
     final db = await database;
-    return await db.insert('water_logs', {'date': date, 'ml': ml, 'type': type});
+    final row = <String, dynamic>{'date': date, 'ml': ml, 'type': type};
+    if (drinkName != null) row['drink_name'] = drinkName;
+    return await db.insert('water_logs', row);
   }
 
   static Future<int> getSoftDrinkWater(String date) async {
@@ -502,6 +538,117 @@ class DatabaseService {
     return streak;
   }
 
+  /// All-time best medicine adherence streak. Persists across resets so the
+  /// user has something to beat even after a missed day.
+  static Future<int> getMedicineBestStreak() async {
+    return await getSettingInt('med_best_streak', 0);
+  }
+
+  /// Recomputes the current streak, bumps the persisted best if exceeded,
+  /// and returns `(current, best)`. Cheap — call this on every `takeMedicine`.
+  static Future<({int current, int best})> refreshMedicineStreaks() async {
+    final current = await getMedicineStreak();
+    final best = await getMedicineBestStreak();
+    if (current > best) {
+      await setSetting('med_best_streak', current.toString());
+      await setSetting('med_best_streak_date',
+          DateTime.now().toIso8601String().split('T').first);
+      return (current: current, best: current);
+    }
+    return (current: current, best: best);
+  }
+
+  /// Day-wise medicine history for the last [days] days. Each day reports
+  /// which active medicines were taken (with time) and which were missed.
+  /// Mirrors `getDailyCalorieHistory` / `getDailyWaterHistory` shape.
+  static Future<Map<String, dynamic>> getDailyMedicineHistory({int days = 30}) async {
+    final db = await database;
+    final meds = await getMedicines();
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final cutoffStr =
+        '${cutoff.year}-${cutoff.month.toString().padLeft(2, '0')}-${cutoff.day.toString().padLeft(2, '0')}';
+
+    // Pull all logs for the window joined to medicines for name+type.
+    final logs = await db.rawQuery('''
+      SELECT ml.date, ml.medicine_id, ml.taken_at, m.name, m.type
+      FROM medicine_logs ml
+      JOIN medicines m ON ml.medicine_id = m.id
+      WHERE ml.date >= ?
+      ORDER BY ml.date DESC, ml.taken_at ASC
+    ''', [cutoffStr]);
+
+    final Map<String, List<Map<String, dynamic>>> byDate = {};
+    for (final l in logs) {
+      final d = l['date'] as String;
+      byDate.putIfAbsent(d, () => []).add(l);
+    }
+
+    final nowTime = DateTime.now();
+
+    // Walk every day in the window (even days with zero entries) so the user
+    // sees missed days too. Skip days before any medicine existed.
+    final List<Map<String, dynamic>> dailyList = [];
+    for (int i = 0; i < days; i++) {
+      final date = DateTime.now().subtract(Duration(days: i));
+      final dateStr =
+          '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+      final isToday = i == 0;
+      final taken = byDate[dateStr] ?? const [];
+      final takenIds = taken.map((e) => e['medicine_id'] as int).toSet();
+      
+      final missed = <Map<String, dynamic>>[];
+      final upcoming = <Map<String, dynamic>>[];
+      
+      for (final m in meds) {
+        if (!takenIds.contains(m['id'] as int)) {
+          bool isPast = true;
+          if (isToday) {
+            final reminderTime = m['reminder_time'] as String;
+            final parts = reminderTime.split(':');
+            if (parts.length == 2) {
+              final h = int.tryParse(parts[0]) ?? 0;
+              final min = int.tryParse(parts[1]) ?? 0;
+              final medTime = DateTime(nowTime.year, nowTime.month, nowTime.day, h, min);
+              if (medTime.isAfter(nowTime)) {
+                isPast = false;
+              }
+            }
+          }
+          if (isPast) {
+            missed.add({'name': m['name'], 'type': m['type']});
+          } else {
+            upcoming.add({'name': m['name'], 'type': m['type'], 'reminder_time': m['reminder_time']});
+          }
+        }
+      }
+
+      dailyList.add({
+        'date': dateStr,
+        'taken': taken
+            .map((e) => {
+                  'name': e['name'],
+                  'type': e['type'],
+                  'taken_at': e['taken_at'],
+                })
+            .toList(),
+        'missed': missed,
+        'upcoming': upcoming,
+        'total': meds.length,
+        'taken_count': taken.length,
+        'complete': meds.isNotEmpty && taken.length >= meds.length,
+      });
+    }
+
+    final current = await getMedicineStreak();
+    final best = await getMedicineBestStreak();
+    return {
+      'days': dailyList,
+      'current_streak': current,
+      'best_streak': best,
+      'total_medicines': meds.length,
+    };
+  }
+
   // ── Weight ──
   static Future<void> addWeight(String date, double kg) async {
     final db = await database;
@@ -581,12 +728,38 @@ class DatabaseService {
         limit: limit);
   }
 
+  static Future<int> addFastingLogManual(String startTime, String endTime, int durationMin) async {
+    final db = await database;
+    return await db.insert('fasting_logs', {
+      'start_time': startTime, 'end_time': endTime, 'duration_min': durationMin,
+    });
+  }
+
+  static Future<void> updateFastingLog(int id, String startTime, String endTime, int durationMin) async {
+    final db = await database;
+    await db.update('fasting_logs',
+        {'start_time': startTime, 'end_time': endTime, 'duration_min': durationMin},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
   // ── Common Meals ──
   static Future<List<Map<String, dynamic>>> getCommonMeals({int minCount = 2, int limit = 8}) async {
     final db = await database;
     return await db.query('common_meals',
         where: 'log_count >= ?', whereArgs: [minCount],
         orderBy: 'log_count DESC', limit: limit);
+  }
+
+  static Future<void> updateCommonMeal(int id, String name, int cal, int protein, int carbs, int fats) async {
+    final db = await database;
+    await db.update('common_meals',
+        {'name': name, 'calories': cal, 'protein': protein, 'carbs': carbs, 'fats': fats},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteCommonMeal(int id) async {
+    final db = await database;
+    await db.delete('common_meals', where: 'id = ?', whereArgs: [id]);
   }
 
   // ── Weekly Stats ──
@@ -722,10 +895,118 @@ class DatabaseService {
         limit: limit);
   }
 
+  static Future<List<Map<String, dynamic>>> getDailySleepHistory({int limit = 30}) async {
+    final db = await database;
+    final allSleeps = await db.query('sleep_logs',
+        where: 'end_time IS NOT NULL',
+        orderBy: 'start_time DESC');
+    
+    final Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (final s in allSleeps) {
+      // Group by the date you WOKE UP (end_time)
+      // This ensures a sleep from 11 PM -> 7 AM and a 2 PM nap both count for the same day.
+      final dt = DateTime.parse(s['end_time'] as String).toLocal();
+      final dateStr = '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+      grouped.putIfAbsent(dateStr, () => []).add(s);
+    }
+    
+    final result = <Map<String, dynamic>>[];
+    final sortedKeys = grouped.keys.toList()..sort((a, b) => b.compareTo(a));
+    for (final k in sortedKeys.take(limit)) {
+      final sessions = grouped[k]!;
+      int totalMin = 0;
+      for (final s in sessions) {
+        totalMin += (s['duration_min'] as int?) ?? 0;
+      }
+      result.add({
+        'date': k,
+        'total_min': totalMin,
+        'sessions': sessions,
+      });
+    }
+    return result;
+  }
+
   static Future<Map<String, dynamic>?> getLastSleep() async {
     final db = await database;
     final r = await db.query('sleep_logs', where: 'end_time IS NOT NULL', orderBy: 'id DESC', limit: 1);
     return r.isNotEmpty ? r.first : null;
+  }
+
+  static Future<int> addSleepLogManual(String startTime, String endTime, int durationMin) async {
+    final db = await database;
+    return await db.insert('sleep_logs', {
+      'start_time': startTime, 'end_time': endTime, 'duration_min': durationMin,
+    });
+  }
+
+  static Future<void> updateSleepLog(int id, String startTime, String endTime, int durationMin) async {
+    final db = await database;
+    await db.update('sleep_logs',
+        {'start_time': startTime, 'end_time': endTime, 'duration_min': durationMin},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteSleepLog(int id) async {
+    final db = await database;
+    await db.delete('sleep_logs', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> deleteFastingLog(int id) async {
+    final db = await database;
+    await db.delete('fasting_logs', where: 'id = ?', whereArgs: [id]);
+  }
+
+  // ── Pinned Meals ──
+  static Future<List<Map<String, dynamic>>> getPinnedMeals() async {
+    final db = await database;
+    return await db.query('pinned_meals', orderBy: 'position ASC, id ASC');
+  }
+
+  static Future<int> addPinnedMeal(String name, int cal, int protein, int carbs, int fats) async {
+    final db = await database;
+    final count = Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM pinned_meals')) ?? 0;
+    return await db.insert('pinned_meals', {
+      'name': name, 'calories': cal, 'protein': protein,
+      'carbs': carbs, 'fats': fats, 'position': count,
+    });
+  }
+
+  static Future<void> updatePinnedMeal(int id, String name, int cal, int protein, int carbs, int fats) async {
+    final db = await database;
+    await db.update('pinned_meals',
+        {'name': name, 'calories': cal, 'protein': protein, 'carbs': carbs, 'fats': fats},
+        where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> removePinnedMeal(int id) async {
+    final db = await database;
+    await db.delete('pinned_meals', where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<void> removeAllPinnedMeals() async {
+    final db = await database;
+    await db.delete('pinned_meals');
+  }
+
+  static Future<List<Map<String, dynamic>>> getSuggestedMealsForPinning({int minCount = 3, int days = 14}) async {
+    final db = await database;
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final cutoffStr = '${cutoff.year}-${cutoff.month.toString().padLeft(2, '0')}-${cutoff.day.toString().padLeft(2, '0')}';
+    return await db.rawQuery('''
+      SELECT item as name,
+             CAST(AVG(calories) AS INTEGER) as calories,
+             CAST(AVG(protein) AS INTEGER) as protein,
+             CAST(AVG(carbs) AS INTEGER) as carbs,
+             CAST(AVG(fats) AS INTEGER) as fats,
+             COUNT(*) as freq
+      FROM food_logs
+      WHERE date >= ?
+      GROUP BY item
+      HAVING COUNT(*) >= ?
+      ORDER BY freq DESC
+      LIMIT 15
+    ''', [cutoffStr, minCount]);
   }
 
   // ── Reminders ──
@@ -858,5 +1139,151 @@ class DatabaseService {
         '• ${_count('medicines')} medicines\n'
         '• ${_count('weight_logs')} weight logs\n'
         '• ${_count('reminders')} reminders';
+  }
+
+  /// Recovery path — restores food / water / weight / fasting / sleep logs from
+  /// an Excel file produced by Settings → Export Excel. APPENDS rows (does
+  /// not wipe existing data) so it's safe to run on a partially-restored DB.
+  /// Medicines / reminders / settings are NOT in the Excel export and must be
+  /// re-entered manually.
+  static Future<String> importFromExcel(File file) async {
+    final db = await database;
+    final bytes = await file.readAsBytes();
+    final excel = xl.Excel.decodeBytes(bytes);
+
+    int food = 0, water = 0, weight = 0, fast = 0, sleep = 0;
+
+    String? cellStr(xl.Data? c) {
+      final v = c?.value;
+      if (v == null) return null;
+      final s = v.toString().trim();
+      return s.isEmpty ? null : s;
+    }
+
+    int? cellInt(xl.Data? c) {
+      final s = cellStr(c);
+      if (s == null) return null;
+      return int.tryParse(s) ?? double.tryParse(s)?.toInt();
+    }
+
+    double? cellDouble(xl.Data? c) {
+      final s = cellStr(c);
+      if (s == null) return null;
+      return double.tryParse(s);
+    }
+
+    await db.transaction((txn) async {
+      // Food Log: Date | Item | Calories | Protein | Carbs | Fats
+      final foodSheet = excel.tables['Food Log'];
+      if (foodSheet != null) {
+        for (var i = 1; i < foodSheet.rows.length; i++) {
+          final r = foodSheet.rows[i];
+          if (r.length < 6) continue;
+          final date = cellStr(r[0]);
+          final item = cellStr(r[1]);
+          if (date == null || item == null) continue;
+          await txn.insert('food_logs', {
+            'date': date,
+            'item': item,
+            'calories': cellInt(r[2]) ?? 0,
+            'protein':  cellInt(r[3]) ?? 0,
+            'carbs':    cellInt(r[4]) ?? 0,
+            'fats':     cellInt(r[5]) ?? 0,
+          });
+          food++;
+        }
+      }
+
+      // Water Log: Date | Amount | Type | [Drink] | Logged At  (drink col optional in older exports)
+      final waterSheet = excel.tables['Water Log'];
+      if (waterSheet != null && waterSheet.rows.isNotEmpty) {
+        final header = waterSheet.rows.first.map((c) => cellStr(c)?.toLowerCase() ?? '').toList();
+        final hasDrink = header.any((h) => h.contains('drink'));
+        for (var i = 1; i < waterSheet.rows.length; i++) {
+          final r = waterSheet.rows[i];
+          if (r.length < 3) continue;
+          final date = cellStr(r[0]);
+          final ml = cellInt(r[1]);
+          if (date == null || ml == null) continue;
+          final type = cellStr(r[2]) ?? 'water';
+          String? drink;
+          String? loggedAt;
+          if (hasDrink && r.length >= 5) {
+            drink = cellStr(r[3]);
+            loggedAt = cellStr(r[4]);
+          } else if (r.length >= 4) {
+            loggedAt = cellStr(r[3]);
+          }
+          await txn.insert('water_logs', {
+            'date': date,
+            'ml': ml,
+            'type': type,
+            if (drink != null) 'drink_name': drink,
+            if (loggedAt != null) 'created_at': loggedAt,
+          });
+          water++;
+        }
+      }
+
+      // Weight Log: Date | Weight (kg)
+      final weightSheet = excel.tables['Weight Log'];
+      if (weightSheet != null) {
+        for (var i = 1; i < weightSheet.rows.length; i++) {
+          final r = weightSheet.rows[i];
+          if (r.length < 2) continue;
+          final date = cellStr(r[0]);
+          final kg = cellDouble(r[1]);
+          if (date == null || kg == null) continue;
+          await txn.insert('weight_logs', {'date': date, 'weight_kg': kg});
+          weight++;
+        }
+      }
+
+      // Fasting Log: Start | End | Duration (skip rows where End == 'Active')
+      final fastSheet = excel.tables['Fasting Log'];
+      if (fastSheet != null) {
+        for (var i = 1; i < fastSheet.rows.length; i++) {
+          final r = fastSheet.rows[i];
+          if (r.length < 3) continue;
+          final start = cellStr(r[0]);
+          if (start == null) continue;
+          final endRaw = cellStr(r[1]);
+          final end = (endRaw == null || endRaw.toLowerCase() == 'active') ? null : endRaw;
+          await txn.insert('fasting_logs', {
+            'start_time': start,
+            'end_time': end,
+            'duration_min': cellInt(r[2]),
+          });
+          fast++;
+        }
+      }
+
+      // Sleep Log: Start | End | Duration
+      final sleepSheet = excel.tables['Sleep Log'];
+      if (sleepSheet != null) {
+        for (var i = 1; i < sleepSheet.rows.length; i++) {
+          final r = sleepSheet.rows[i];
+          if (r.length < 3) continue;
+          final start = cellStr(r[0]);
+          if (start == null) continue;
+          final endRaw = cellStr(r[1]);
+          final end = (endRaw == null || endRaw.toLowerCase() == 'active') ? null : endRaw;
+          await txn.insert('sleep_logs', {
+            'start_time': start,
+            'end_time': end,
+            'duration_min': cellInt(r[2]),
+          });
+          sleep++;
+        }
+      }
+    });
+
+    return 'Recovered from Excel:\n'
+        '• $food food logs\n'
+        '• $water water logs\n'
+        '• $weight weight logs\n'
+        '• $fast fasting sessions\n'
+        '• $sleep sleep sessions\n\n'
+        'Note: medicines, reminders, and settings are not in Excel exports — set them up again from the relevant screens.';
   }
 }

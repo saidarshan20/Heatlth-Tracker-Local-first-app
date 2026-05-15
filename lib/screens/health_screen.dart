@@ -113,7 +113,6 @@ class _HealthScreenState extends State<HealthScreen> {
 
   Future<void> _showFastingHistory() async {
     final history = await DatabaseService.getFastingHistory();
-
     if (!mounted) return;
     showModalBottomSheet(
       context: context,
@@ -121,6 +120,90 @@ class _HealthScreenState extends State<HealthScreen> {
       backgroundColor: Colors.transparent,
       builder: (ctx) => _FastingHistorySheet(history: history),
     );
+  }
+
+  Future<void> _showManualFastEntry({Map<String, dynamic>? existing}) async {
+    final now = DateTime.now();
+    DateTime startDt = existing != null
+        ? DateTime.parse(existing['start_time']).toLocal()
+        : now.subtract(const Duration(hours: 16));
+    DateTime endDt = existing != null
+        ? DateTime.parse(existing['end_time']).toLocal()
+        : now;
+
+    final result = await showDialog<Map<String, DateTime>>(
+      context: context,
+      builder: (ctx) => _DateTimeRangeDialog(
+        title: existing != null ? 'Edit Fast' : 'Add Fasting Entry',
+        emoji: '⚡',
+        startLabel: 'Fast started',
+        endLabel: 'Fast ended',
+        initialStart: startDt,
+        initialEnd: endDt,
+      ),
+    );
+    if (result == null || !mounted) return;
+    final s = result['start']!;
+    final e = result['end']!;
+    if (!e.isAfter(s)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('End time must be after start time.')),
+      );
+      return;
+    }
+    final dur = e.difference(s).inMinutes;
+    if (existing != null) {
+      await DatabaseService.updateFastingLog(existing['id'] as int, s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    } else {
+      await DatabaseService.addFastingLogManual(s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('⚡ Fast ${existing != null ? 'updated' : 'added'}! ${dur ~/ 60}h ${dur % 60}m')),
+      );
+    }
+  }
+
+  Future<void> _showManualSleepEntry({Map<String, dynamic>? existing}) async {
+    final now = DateTime.now();
+    DateTime startDt = existing != null
+        ? DateTime.parse(existing['start_time']).toLocal()
+        : now.subtract(const Duration(hours: 8));
+    DateTime endDt = existing != null
+        ? DateTime.parse(existing['end_time']).toLocal()
+        : now;
+
+    final result = await showDialog<Map<String, DateTime>>(
+      context: context,
+      builder: (ctx) => _DateTimeRangeDialog(
+        title: existing != null ? 'Edit Sleep' : 'Add Sleep Entry',
+        emoji: '😴',
+        startLabel: 'Went to sleep',
+        endLabel: 'Woke up',
+        initialStart: startDt,
+        initialEnd: endDt,
+      ),
+    );
+    if (result == null || !mounted) return;
+    final s = result['start']!;
+    final e = result['end']!;
+    if (!e.isAfter(s)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Wake time must be after sleep time.')),
+      );
+      return;
+    }
+    final dur = e.difference(s).inMinutes;
+    if (existing != null) {
+      await DatabaseService.updateSleepLog(existing['id'] as int, s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    } else {
+      await DatabaseService.addSleepLogManual(s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('😴 Sleep ${existing != null ? 'updated' : 'added'}! ${dur ~/ 60}h ${dur % 60}m')),
+      );
+    }
   }
 
   // ── Sleep methods ──
@@ -148,11 +231,13 @@ class _HealthScreenState extends State<HealthScreen> {
   Future<void> _startSleep() async {
     await DatabaseService.startSleep(DateTime.now().toIso8601String());
     await _loadData();
-    // Show the live notification immediately
+    // Show the live notification immediately and suppress tonight's scheduled
+    // "time to sleep" reminder — user is already in bed.
     if (_activeSleep != null) {
       final start = DateTime.parse(_activeSleep!['start_time']);
       await NotificationService.showSleepNotification(start);
     }
+    await NotificationService.suppressSleepReminderForToday();
   }
 
   Future<void> _endSleep() async {
@@ -173,13 +258,24 @@ class _HealthScreenState extends State<HealthScreen> {
   }
 
   Future<void> _showSleepHistory() async {
-    final history = await DatabaseService.getSleepHistory();
+    final history = await DatabaseService.getDailySleepHistory();
     if (!mounted) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => _SleepHistorySheet(history: history),
+    );
+  }
+
+  Future<void> _showMedicineHistory() async {
+    final history = await DatabaseService.getDailyMedicineHistory();
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => MedicineHistorySheet(data: history),
     );
   }
 
@@ -360,6 +456,13 @@ class _HealthScreenState extends State<HealthScreen> {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
+                            IconButton(
+                              onPressed: _showMedicineHistory,
+                              tooltip: 'History',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                              icon: const Icon(Icons.history_rounded, size: 18, color: AppColors.onSurfaceVariant),
+                            ),
                             TextButton(
                               onPressed: _showAddMedicineDialog,
                               child: const Text('+ Add', style: TextStyle(fontSize: 11, color: AppColors.primary)),
@@ -418,10 +521,21 @@ class _HealthScreenState extends State<HealthScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('⚡ Fasting Tracker', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                      TextButton(
-                        onPressed: _showFastingHistory,
-                        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                        child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextButton(
+                            onPressed: _showFastingHistory,
+                            style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                            child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
+                            onPressed: _showManualFastEntry,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -448,11 +562,10 @@ class _HealthScreenState extends State<HealthScreen> {
                     const SizedBox(height: 8),
                     Builder(builder: (ctx) {
                       final eatEnd = DateTime.parse(_activeFast!['start_time']).add(const Duration(hours: 16));
-                      final h = eatEnd.hour % 12 == 0 ? 12 : eatEnd.hour % 12;
+                      final h = eatEnd.hour.toString().padLeft(2, '0');
                       final m = eatEnd.minute.toString().padLeft(2, '0');
-                      final ampm = eatEnd.hour < 12 ? 'AM' : 'PM';
                       return Text(
-                        'Eating window opens at $h:$m $ampm',
+                        'Eating window opens at $h:$m',
                         textAlign: TextAlign.center,
                         style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
                       );
@@ -490,10 +603,21 @@ class _HealthScreenState extends State<HealthScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       const Text('😴 Sleep Tracker', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                      TextButton(
-                        onPressed: _showSleepHistory,
-                        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                        child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          TextButton(
+                            onPressed: _showSleepHistory,
+                            style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 0), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                            child: const Text('History', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.add_circle_outline, color: Color(0xFF7B68EE), size: 20),
+                            onPressed: _showManualSleepEntry,
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        ],
                       ),
                     ],
                   ),
@@ -520,11 +644,10 @@ class _HealthScreenState extends State<HealthScreen> {
                     const SizedBox(height: 8),
                     Builder(builder: (ctx) {
                       final startTime = DateTime.parse(_activeSleep!['start_time']);
-                      final h = startTime.hour % 12 == 0 ? 12 : startTime.hour % 12;
+                      final h = startTime.hour.toString().padLeft(2, '0');
                       final m = startTime.minute.toString().padLeft(2, '0');
-                      final ampm = startTime.hour < 12 ? 'AM' : 'PM';
                       return Text(
-                        'Went to bed at $h:$m $ampm',
+                        'Went to bed at $h:$m',
                         textAlign: TextAlign.center,
                         style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
                       );
@@ -598,8 +721,8 @@ class _HealthScreenState extends State<HealthScreen> {
                         final allWeights = _weights.map((e) => (e['weight_kg'] as num).toDouble()).toList();
                         final minW = allWeights.reduce((a, b) => a < b ? a : b);
                         final maxW = allWeights.reduce((a, b) => a > b ? a : b);
-                        final range = (maxW - minW).clamp(0.5, double.infinity);
-                        final pct = ((kg - minW) / range * 80 + 20).clamp(4.0, 100.0);
+                        final range = (maxW - minW).clamp(2.0, double.infinity);
+                        final pct = ((kg - minW) / range * 70 + 30).clamp(10.0, 100.0);
                         final isLast = w == _weights.first;
                         return Expanded(
                           child: Column(
@@ -635,115 +758,6 @@ class _HealthScreenState extends State<HealthScreen> {
               ),
             ),
 
-            // ── Today's Activity ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('📋 Today\'s Activity', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                  const SizedBox(height: 8),
-
-                  // Medicine logs
-                  if (dash.medicineLogsToday.isNotEmpty) ...[
-                    const Text('Medicines taken:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                    const SizedBox(height: 4),
-                    ...dash.medicineLogsToday.map((ml) => Dismissible(
-                      key: ValueKey('ml_${ml['id']}'),
-                      direction: DismissDirection.endToStart,
-                      background: Container(
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.only(right: 16),
-                        child: const Text('Undo', style: TextStyle(color: AppColors.error, fontSize: 12)),
-                      ),
-                      onDismissed: (_) async {
-                        await dash.undoMedicine(ml['medicine_id'] as int);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('↩️ ${ml['name']} undone')),
-                          );
-                        }
-                      },
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 3),
-                        child: Row(
-                          children: [
-                            Text(dash.getMedEmoji(ml['type'] as String? ?? 'tablet'), style: const TextStyle(fontSize: 14)),
-                            const SizedBox(width: 8),
-                            Expanded(child: Text(ml['name'] as String, style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
-                            Text(ml['taken_at'] as String, style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                          ],
-                        ),
-                      ),
-                    )),
-                    const Divider(height: 16, color: AppColors.outline),
-                  ],
-
-                  // Water logs
-                  if (dash.waterEntries.isNotEmpty) ...[
-                    const Text('Water intake:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                    const SizedBox(height: 4),
-                    ...dash.waterEntries.map((w) {
-                      final isSoftDrink = (w['type'] ?? 'water') == 'soft_drink';
-                      return Dismissible(
-                        key: ValueKey('water_${w['id']}'),
-                        direction: DismissDirection.endToStart,
-                        background: Container(
-                          alignment: Alignment.centerRight,
-                          padding: const EdgeInsets.only(right: 16),
-                          child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
-                        ),
-                        onDismissed: (_) async {
-                          await dash.deleteWater(w['id'] as int);
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('🗑️ ${w['ml']}ml deleted')),
-                            );
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 3),
-                          child: Row(
-                            children: [
-                              Text(isSoftDrink ? '🥤' : '💧', style: const TextStyle(fontSize: 14)),
-                              const SizedBox(width: 8),
-                              Text(
-                                '+${w['ml']}ml',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: isSoftDrink ? const Color(0xFF9C27B0) : AppColors.water,
-                                ),
-                              ),
-                              if (isSoftDrink) ...[
-                                const SizedBox(width: 6),
-                                const Text('Soft drink', style: TextStyle(fontSize: 10, color: Color(0xFF9C27B0))),
-                              ],
-                              const Spacer(),
-                              Builder(
-                                builder: (ctx) {
-                                  String timeStr = '';
-                                  if (w['created_at'] != null) {
-                                    try {
-                                      final raw = w['created_at'].toString().replaceAll(' ', 'T') + 'Z';
-                                      final dt = DateTime.parse(raw).toLocal();
-                                      timeStr = DateFormat('hh:mm a').format(dt);
-                                    } catch (_) {}
-                                  }
-                                  return Text(timeStr, style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant));
-                                },
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    }),
-                  ],
-
-                  if (dash.medicineLogsToday.isEmpty && dash.waterEntries.isEmpty)
-                    const Text('No activity logged yet today.', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
-                ],
-              ),
-            ),
           ],
         );
       },
@@ -782,11 +796,23 @@ class _HealthScreenState extends State<HealthScreen> {
 // ─────────────────────────────────────────────
 // Fasting History Bottom Sheet
 // ─────────────────────────────────────────────
-class _FastingHistorySheet extends StatelessWidget {
+class _FastingHistorySheet extends StatefulWidget {
   final List<Map<String, dynamic>> history;
   const _FastingHistorySheet({required this.history});
 
+  @override
+  State<_FastingHistorySheet> createState() => _FastingHistorySheetState();
+}
+
+class _FastingHistorySheetState extends State<_FastingHistorySheet> {
+  late List<Map<String, dynamic>> _history;
   static const int _goalMinutes = 16 * 60;
+
+  @override
+  void initState() {
+    super.initState();
+    _history = List.from(widget.history);
+  }
 
   String _fmt(int minutes) {
     final h = minutes ~/ 60;
@@ -805,25 +831,88 @@ class _FastingHistorySheet extends StatelessWidget {
   String _fmtTime(String iso) {
     try {
       final dt = DateTime.parse(iso).toLocal();
-      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final h = dt.hour.toString().padLeft(2, '0');
       final m = dt.minute.toString().padLeft(2, '0');
-      final ampm = dt.hour < 12 ? 'AM' : 'PM';
-      return '$h:$m $ampm';
+      return '$h:$m';
     } catch (_) { return ''; }
+  }
+
+  Future<void> _editEntry(Map<String, dynamic> entry) async {
+    final startDt = DateTime.parse(entry['start_time'] as String).toLocal();
+    final endDt = DateTime.parse(entry['end_time'] as String).toLocal();
+    final result = await showDialog<Map<String, DateTime>>(
+      context: context,
+      builder: (ctx) => _DateTimeRangeDialog(
+        title: 'Edit Fast',
+        emoji: '⚡',
+        startLabel: 'Fast started',
+        endLabel: 'Fast ended',
+        initialStart: startDt,
+        initialEnd: endDt,
+      ),
+    );
+    if (result == null || !mounted) return;
+    final s = result['start']!;
+    final e = result['end']!;
+    if (!e.isAfter(s)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('End time must be after start time.')),
+      );
+      return;
+    }
+    final dur = e.difference(s).inMinutes;
+    await DatabaseService.updateFastingLog(entry['id'] as int, s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    setState(() {
+      final idx = _history.indexWhere((f) => f['id'] == entry['id']);
+      if (idx != -1) {
+        _history[idx] = {
+          ..._history[idx],
+          'start_time': s.toUtc().toIso8601String(),
+          'end_time': e.toUtc().toIso8601String(),
+          'duration_min': dur,
+        };
+      }
+    });
+  }
+
+  Future<void> _deleteEntry(Map<String, dynamic> entry) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Delete Fast?', style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans')),
+        content: Text(
+          'Remove this ${_fmt((entry['duration_min'] as int?) ?? 0)} fasting session?',
+          style: const TextStyle(fontSize: 13, color: AppColors.onSurfaceVariant),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await DatabaseService.deleteFastingLog(entry['id'] as int);
+    setState(() => _history.removeWhere((f) => f['id'] == entry['id']));
   }
 
   @override
   Widget build(BuildContext context) {
-    // Summary stats
-    int totalFasts = history.length;
+    final totalFasts = _history.length;
     int bestMin = 0, sumMin = 0;
-    for (final f in history) {
+    for (final f in _history) {
       final d = (f['duration_min'] as int?) ?? 0;
       if (d > bestMin) bestMin = d;
       sumMin += d;
     }
     final avgMin = totalFasts > 0 ? sumMin ~/ totalFasts : 0;
-    final goalsHit = history.where((f) => ((f['duration_min'] as int?) ?? 0) >= _goalMinutes).length;
+    final goalsHit = _history.where((f) => ((f['duration_min'] as int?) ?? 0) >= _goalMinutes).length;
 
     return DraggableScrollableSheet(
       initialChildSize: 0.65,
@@ -837,13 +926,11 @@ class _FastingHistorySheet extends StatelessWidget {
         ),
         child: Column(
           children: [
-            // Handle
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 12),
               child: Container(width: 36, height: 4,
                 decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99))),
             ),
-            // Title
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
@@ -859,7 +946,6 @@ class _FastingHistorySheet extends StatelessWidget {
             ),
             const SizedBox(height: 12),
 
-            // ── Summary strip ──
             if (totalFasts > 0)
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -876,9 +962,8 @@ class _FastingHistorySheet extends StatelessWidget {
             const SizedBox(height: 12),
             const Divider(height: 1, color: AppColors.outline),
 
-            // ── List ──
             Expanded(
-              child: history.isEmpty
+              child: _history.isEmpty
                   ? const Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -896,10 +981,10 @@ class _FastingHistorySheet extends StatelessWidget {
                   : ListView.separated(
                       controller: scrollCtrl,
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                      itemCount: history.length,
+                      itemCount: _history.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 8),
                       itemBuilder: (_, i) {
-                        final f = history[i];
+                        final f = _history[i];
                         final durMin = (f['duration_min'] as int?) ?? 0;
                         final goalMet = durMin >= _goalMinutes;
                         final progress = (durMin / _goalMinutes).clamp(0.0, 1.0);
@@ -919,13 +1004,12 @@ class _FastingHistorySheet extends StatelessWidget {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              // Top row: date + goal pill
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(dateLabel,
                                       style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
                                           color: AppColors.onSurface)),
+                                  const SizedBox(width: 8),
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                     decoration: BoxDecoration(
@@ -942,10 +1026,22 @@ class _FastingHistorySheet extends StatelessWidget {
                                           color: goalMet ? AppColors.primary : AppColors.onSurfaceVariant),
                                     ),
                                   ),
+                                  const Spacer(),
+                                  IconButton(
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                    icon: const Icon(Icons.edit_outlined, size: 16, color: AppColors.onSurfaceVariant),
+                                    onPressed: () => _editEntry(f),
+                                  ),
+                                  IconButton(
+                                    padding: EdgeInsets.zero,
+                                    constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                                    icon: Icon(Icons.delete_outline, size: 16, color: AppColors.error.withOpacity(0.7)),
+                                    onPressed: () => _deleteEntry(f),
+                                  ),
                                 ],
                               ),
                               const SizedBox(height: 6),
-                              // Duration + times
                               Row(
                                 children: [
                                   Text(
@@ -960,7 +1056,6 @@ class _FastingHistorySheet extends StatelessWidget {
                                 ],
                               ),
                               const SizedBox(height: 8),
-                              // Progress bar
                               ClipRRect(
                                 borderRadius: BorderRadius.circular(99),
                                 child: LinearProgressIndicator(
@@ -1012,11 +1107,24 @@ class _FastingHistorySheet extends StatelessWidget {
 // ─────────────────────────────────────────────
 // Sleep History Bottom Sheet
 // ─────────────────────────────────────────────
-class _SleepHistorySheet extends StatelessWidget {
+class _SleepHistorySheet extends StatefulWidget {
   final List<Map<String, dynamic>> history;
   const _SleepHistorySheet({required this.history});
 
+  @override
+  State<_SleepHistorySheet> createState() => _SleepHistorySheetState();
+}
+
+class _SleepHistorySheetState extends State<_SleepHistorySheet> {
+  late List<Map<String, dynamic>> _history;
   static const int _goalMinutes = 8 * 60;
+  static const _sleepColor = Color(0xFF7B68EE);
+
+  @override
+  void initState() {
+    super.initState();
+    _history = List.from(widget.history);
+  }
 
   String _fmt(int minutes) {
     final h = minutes ~/ 60;
@@ -1035,15 +1143,84 @@ class _SleepHistorySheet extends StatelessWidget {
   String _fmtTime(String iso) {
     try {
       final dt = DateTime.parse(iso).toLocal();
-      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final h = dt.hour.toString().padLeft(2, '0');
       final m = dt.minute.toString().padLeft(2, '0');
-      final ampm = dt.hour < 12 ? 'AM' : 'PM';
-      return '$h:$m $ampm';
+      return '$h:$m';
     } catch (_) { return ''; }
+  }
+
+  Future<void> _refresh() async {
+    final fresh = await DatabaseService.getDailySleepHistory();
+    if (mounted) setState(() => _history = fresh);
+  }
+
+  Future<void> _editEntry(Map<String, dynamic> entry) async {
+    final startDt = DateTime.parse(entry['start_time'] as String).toLocal();
+    final endDt = DateTime.parse(entry['end_time'] as String).toLocal();
+    final result = await showDialog<Map<String, DateTime>>(
+      context: context,
+      builder: (ctx) => _DateTimeRangeDialog(
+        title: 'Edit Sleep',
+        emoji: '😴',
+        startLabel: 'Went to sleep',
+        endLabel: 'Woke up',
+        initialStart: startDt,
+        initialEnd: endDt,
+      ),
+    );
+    if (result == null || !mounted) return;
+    final s = result['start']!;
+    final e = result['end']!;
+    if (!e.isAfter(s)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Wake time must be after sleep time.')),
+      );
+      return;
+    }
+    final dur = e.difference(s).inMinutes;
+    await DatabaseService.updateSleepLog(entry['id'] as int, s.toUtc().toIso8601String(), e.toUtc().toIso8601String(), dur);
+    await _refresh();
+  }
+
+  Future<void> _deleteEntry(Map<String, dynamic> entry) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainer,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Delete Sleep?', style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans')),
+        content: Text(
+          'Remove this ${_fmt((entry['duration_min'] as int?) ?? 0)} sleep session?',
+          style: const TextStyle(fontSize: 13, color: AppColors.onSurfaceVariant),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant))),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error, foregroundColor: Colors.white),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await DatabaseService.deleteSleepLog(entry['id'] as int);
+    await _refresh();
   }
 
   @override
   Widget build(BuildContext context) {
+    final totalDays = _history.length;
+    int bestMin = 0, sumMin = 0, totalDebtSurplusMin = 0;
+    for (final dayData in _history) {
+      final totalMin = (dayData['total_min'] as int?) ?? 0;
+      if (totalMin > bestMin) bestMin = totalMin;
+      sumMin += totalMin;
+      totalDebtSurplusMin += (totalMin - _goalMinutes);
+    }
+    final avgMin = totalDays > 0 ? sumMin ~/ totalDays : 0;
+
     return DraggableScrollableSheet(
       initialChildSize: 0.65,
       minChildSize: 0.35,
@@ -1060,18 +1237,41 @@ class _SleepHistorySheet extends StatelessWidget {
               padding: const EdgeInsets.symmetric(vertical: 12),
               child: Container(width: 36, height: 4, decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99))),
             ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Row(
                 children: [
-                  Text('😴 Sleep History', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Text('😴 Sleep History',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Spacer(),
+                  Text('$totalDays days',
+                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
                 ],
               ),
             ),
             const SizedBox(height: 12),
+            if (totalDays > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: [
+                    _statChip('📊 Avg. Sleep', _fmt(avgMin)),
+                    const SizedBox(width: 8),
+                    _statChip('🏆 Longest', _fmt(bestMin)),
+                    const SizedBox(width: 8),
+                    _statChip(
+                      totalDebtSurplusMin >= 0 ? '📈 Surplus' : '⚠️ Debt',
+                      totalDebtSurplusMin == 0
+                          ? '0h'
+                          : '${totalDebtSurplusMin > 0 ? '+' : '-'}${_fmt(totalDebtSurplusMin.abs())}',
+                    ),
+                  ],
+                ),
+              ),
+            const SizedBox(height: 12),
             const Divider(height: 1, color: AppColors.outline),
             Expanded(
-              child: history.isEmpty
+              child: _history.isEmpty
                   ? const Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -1085,40 +1285,44 @@ class _SleepHistorySheet extends StatelessWidget {
                   : ListView.separated(
                       controller: scrollCtrl,
                       padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                      itemCount: history.length,
+                      itemCount: _history.length,
                       separatorBuilder: (_, __) => const SizedBox(height: 8),
                       itemBuilder: (_, i) {
-                        final s = history[i];
-                        final durMin = (s['duration_min'] as int?) ?? 0;
-                        final goalMet = durMin >= _goalMinutes;
-                        final progress = (durMin / _goalMinutes).clamp(0.0, 1.0);
-                        final dateLabel = _fmtDate(s['start_time'] as String);
-                        final startLabel = _fmtTime(s['start_time'] as String);
-                        final endLabel = _fmtTime(s['end_time'] as String);
+                        final dayData = _history[i];
+                        final dateStr = dayData['date'] as String;
+                        final totalMin = (dayData['total_min'] as int?) ?? 0;
+                        final sessions = dayData['sessions'] as List<Map<String, dynamic>>;
+                        
+                        final goalMet = totalMin >= _goalMinutes;
+                        final progress = (totalMin / _goalMinutes).clamp(0.0, 1.0);
+                        
+                        final parsedDt = DateTime.tryParse(dateStr) ?? DateTime.now();
+                        const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                        final dateLabel = '${parsedDt.day} ${months[parsedDt.month - 1]}';
 
                         return Container(
                           padding: const EdgeInsets.all(14),
                           decoration: BoxDecoration(
                             color: AppColors.surfaceContainerHigh,
                             borderRadius: BorderRadius.circular(16),
-                            border: goalMet ? Border.all(color: const Color(0xFF7B68EE).withValues(alpha: 0.4), width: 1) : null,
+                            border: goalMet ? Border.all(color: _sleepColor.withValues(alpha: 0.4), width: 1) : null,
                           ),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
                                   Text(dateLabel, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                                  const SizedBox(width: 8),
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: goalMet ? const Color(0xFF7B68EE).withValues(alpha: 0.15) : AppColors.surfaceContainer,
+                                      color: goalMet ? _sleepColor.withValues(alpha: 0.15) : AppColors.surfaceContainer,
                                       borderRadius: BorderRadius.circular(99),
                                     ),
                                     child: Text(
-                                      goalMet ? '🎯 8h+ reached' : '⏱ ${_fmt(durMin)}',
-                                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: goalMet ? const Color(0xFF7B68EE) : AppColors.onSurfaceVariant),
+                                      goalMet ? '🎯 8h+ reached' : '⏱ ${_fmt(totalMin)}',
+                                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: goalMet ? _sleepColor : AppColors.onSurfaceVariant),
                                     ),
                                   ),
                                 ],
@@ -1126,9 +1330,9 @@ class _SleepHistorySheet extends StatelessWidget {
                               const SizedBox(height: 6),
                               Row(
                                 children: [
-                                  Text(_fmt(durMin), style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: goalMet ? const Color(0xFF7B68EE) : AppColors.onSurface)),
+                                  Text(_fmt(totalMin), style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: goalMet ? _sleepColor : AppColors.onSurface)),
                                   const SizedBox(width: 10),
-                                  Text('$startLabel → $endLabel', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                                  Text('${sessions.length} session${sessions.length == 1 ? '' : 's'}', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
                                 ],
                               ),
                               const SizedBox(height: 8),
@@ -1138,15 +1342,70 @@ class _SleepHistorySheet extends StatelessWidget {
                                   value: progress,
                                   minHeight: 5,
                                   backgroundColor: AppColors.surfaceContainer,
-                                  valueColor: AlwaysStoppedAnimation(goalMet ? const Color(0xFF7B68EE) : AppColors.onSurfaceVariant),
+                                  valueColor: AlwaysStoppedAnimation(goalMet ? _sleepColor : AppColors.onSurfaceVariant),
                                 ),
                               ),
+                              if (sessions.isNotEmpty) ...[
+                                const SizedBox(height: 12),
+                                const Divider(height: 1, color: AppColors.outline),
+                                const SizedBox(height: 8),
+                                ...sessions.map((s) {
+                                  final startLabel = _fmtTime(s['start_time'] as String);
+                                  final endLabel = _fmtTime(s['end_time'] as String);
+                                  final dur = (s['duration_min'] as int?) ?? 0;
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 6),
+                                    child: Row(
+                                      children: [
+                                        const Text('·', style: TextStyle(fontSize: 18, color: AppColors.onSurfaceVariant)),
+                                        const SizedBox(width: 8),
+                                        Text('$startLabel → $endLabel', style: const TextStyle(fontSize: 11, color: AppColors.onSurface)),
+                                        const Spacer(),
+                                        Text(_fmt(dur), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: AppColors.onSurfaceVariant)),
+                                        const SizedBox(width: 4),
+                                        IconButton(
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                                          icon: const Icon(Icons.edit_outlined, size: 14, color: AppColors.primary),
+                                          onPressed: () => _editEntry(s),
+                                        ),
+                                        IconButton(
+                                          padding: EdgeInsets.zero,
+                                          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                                          icon: Icon(Icons.delete_outline, size: 14, color: AppColors.error.withValues(alpha: 0.7)),
+                                          onPressed: () => _deleteEntry(s),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                }),
+                              ],
                             ],
                           ),
                         );
                       },
                     ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statChip(String label, String value) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant)),
+            const SizedBox(height: 2),
+            Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
           ],
         ),
       ),
@@ -1196,10 +1455,9 @@ class _WeightHistorySheetState extends State<_WeightHistorySheet> {
   }
 
   String _fmtTime(TimeOfDay t) {
-    final h = t.hourOfPeriod == 0 ? 12 : t.hourOfPeriod;
+    final h = t.hour.toString().padLeft(2, '0');
     final m = t.minute.toString().padLeft(2, '0');
-    final ampm = t.period == DayPeriod.am ? 'AM' : 'PM';
-    return '$h:$m $ampm';
+    return '$h:$m';
   }
 
   Future<void> _editWeight(Map<String, dynamic> entry) async {
@@ -1619,10 +1877,9 @@ class WaterHistorySheetState extends State<WaterHistorySheet> {
     try {
       final raw = createdAt.replaceAll(' ', 'T') + 'Z';
       final dt = DateTime.parse(raw).toLocal();
-      final h = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final h = dt.hour.toString().padLeft(2, '0');
       final m = dt.minute.toString().padLeft(2, '0');
-      final ap = dt.hour < 12 ? 'AM' : 'PM';
-      return '$h:$m $ap';
+      return '$h:$m';
     } catch (_) { return ''; }
   }
 
@@ -1918,6 +2175,554 @@ class WaterHistorySheetState extends State<WaterHistorySheet> {
                                           const Spacer(),
                                           Text(_fmtTime(entry['created_at'] as String?),
                                               style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                                ],
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// Date+Time Range Picker Dialog
+// ─────────────────────────────────────────────
+class _DateTimeRangeDialog extends StatefulWidget {
+  final String title;
+  final String emoji;
+  final String startLabel;
+  final String endLabel;
+  final DateTime initialStart;
+  final DateTime initialEnd;
+
+  const _DateTimeRangeDialog({
+    required this.title,
+    required this.emoji,
+    required this.startLabel,
+    required this.endLabel,
+    required this.initialStart,
+    required this.initialEnd,
+  });
+
+  @override
+  State<_DateTimeRangeDialog> createState() => _DateTimeRangeDialogState();
+}
+
+class _DateTimeRangeDialogState extends State<_DateTimeRangeDialog> {
+  late DateTime _start;
+  late DateTime _end;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = widget.initialStart;
+    _end = widget.initialEnd;
+  }
+
+  String _fmtDateTime(DateTime dt) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    final h = dt.hour.toString().padLeft(2, '0');
+    final m = dt.minute.toString().padLeft(2, '0');
+    return '${dt.day} ${months[dt.month - 1]}, $h:$m';
+  }
+
+  int get _durationMin => _end.difference(_start).inMinutes;
+
+  String _fmtDuration(int minutes) {
+    if (minutes <= 0) return '—';
+    final h = minutes ~/ 60;
+    final m = minutes % 60;
+    return m == 0 ? '${h}h' : '${h}h ${m}m';
+  }
+
+  Future<void> _pickDateTime(bool isStart) async {
+    final initial = isStart ? _start : _end;
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime.now().subtract(const Duration(days: 365)),
+      lastDate: DateTime.now(),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: Theme.of(ctx).colorScheme.copyWith(primary: AppColors.primary),
+        ),
+        child: child!,
+      ),
+    );
+    if (date == null || !mounted) return;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+      builder: (ctx, child) => Theme(
+        data: Theme.of(ctx).copyWith(
+          colorScheme: Theme.of(ctx).colorScheme.copyWith(primary: AppColors.primary),
+        ),
+        child: child!,
+      ),
+    );
+    if (time == null || !mounted) return;
+    final picked = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+    setState(() {
+      if (isStart) {
+        _start = picked;
+      } else {
+        _end = picked;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final durMin = _durationMin;
+    final valid = durMin > 0;
+
+    return AlertDialog(
+      backgroundColor: AppColors.surfaceContainer,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      title: Text('${widget.emoji} ${widget.title}',
+          style: const TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans', fontSize: 16)),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _timeRow(widget.startLabel, _start, () => _pickDateTime(true)),
+          const SizedBox(height: 12),
+          _timeRow(widget.endLabel, _end, () => _pickDateTime(false)),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: valid ? AppColors.primary.withValues(alpha: 0.1) : AppColors.surfaceContainerHigh,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  'Duration: ${_fmtDuration(durMin)}',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: valid ? AppColors.primary : AppColors.error,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant)),
+        ),
+        ElevatedButton(
+          onPressed: valid ? () => Navigator.pop(context, {'start': _start, 'end': _end}) : null,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.primary,
+            foregroundColor: AppColors.surface,
+            disabledBackgroundColor: AppColors.surfaceContainerHigh,
+          ),
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+
+  Widget _timeRow(String label, DateTime dt, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                  const SizedBox(height: 2),
+                  Text(_fmtDateTime(dt),
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                ],
+              ),
+            ),
+            const Icon(Icons.edit_calendar_outlined, size: 16, color: AppColors.onSurfaceVariant),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// Medicine History Bottom Sheet
+// ─────────────────────────────────────────────
+class MedicineHistorySheet extends StatefulWidget {
+  final Map<String, dynamic> data;
+  const MedicineHistorySheet({super.key, required this.data});
+
+  @override
+  State<MedicineHistorySheet> createState() => _MedicineHistorySheetState();
+}
+
+class _MedicineHistorySheetState extends State<MedicineHistorySheet> {
+  final Set<int> _expandedIndices = {};
+
+  String _fmtDate(String dateStr) {
+    try {
+      final dt = DateTime.parse(dateStr);
+      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+      const days = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+      return '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]}';
+    } catch (_) { return dateStr; }
+  }
+
+  String _streakBadge(int streak) {
+    if (streak >= 100) return '💎';
+    if (streak >= 30) return '🏆';
+    if (streak >= 7) return '🔥';
+    return '⭐';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final days = widget.data['days'] as List<dynamic>;
+    final currentStreak = widget.data['current_streak'] as int;
+    final bestStreak = widget.data['best_streak'] as int;
+    final totalMeds = widget.data['total_medicines'] as int;
+    final daysToBeat = bestStreak > currentStreak ? (bestStreak - currentStreak + 1) : 0;
+
+    return DraggableScrollableSheet(
+      initialChildSize: 0.72,
+      minChildSize: 0.45,
+      maxChildSize: 0.95,
+      expand: false,
+      builder: (_, scrollCtrl) => Container(
+        decoration: const BoxDecoration(
+          color: AppColors.surfaceContainer,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // ── Drag handle ──
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Container(
+                width: 36, height: 4,
+                decoration: BoxDecoration(color: AppColors.outline, borderRadius: BorderRadius.circular(99)),
+              ),
+            ),
+
+            // ── Title ──
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Row(
+                children: [
+                  const Text('💊 Medicine History',
+                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700,
+                          fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Spacer(),
+                  Text('${days.length} days',
+                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ── Streak chips ──
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                children: [
+                  // Current
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [AppColors.primary.withOpacity(0.18), AppColors.primary.withOpacity(0.06)],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: AppColors.primary.withOpacity(0.35)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Text(_streakBadge(currentStreak), style: const TextStyle(fontSize: 13)),
+                              const SizedBox(width: 4),
+                              const Text('Current', style: TextStyle(fontSize: 10, color: AppColors.primary, fontWeight: FontWeight.w700)),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '$currentStreak ${currentStreak == 1 ? "day" : "days"}',
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: AppColors.primary),
+                          ),
+                          const Text('streak', style: TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Best
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 14),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [const Color(0xFFFFC107).withOpacity(0.16), const Color(0xFFFFC107).withOpacity(0.04)],
+                        ),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: const Color(0xFFFFC107).withOpacity(0.35)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Text('🏆', style: TextStyle(fontSize: 13)),
+                              SizedBox(width: 4),
+                              Text('Best', style: TextStyle(fontSize: 10, color: Color(0xFFFFC107), fontWeight: FontWeight.w700)),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            '$bestStreak ${bestStreak == 1 ? "day" : "days"}',
+                            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800, color: Color(0xFFFFC107)),
+                          ),
+                          Text(
+                            daysToBeat > 0 ? '$daysToBeat to beat' : 'New record!',
+                            style: const TextStyle(fontSize: 9, color: AppColors.onSurfaceVariant),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: AppColors.outline),
+
+            // ── Daily list ──
+            Expanded(
+              child: days.isEmpty || totalMeds == 0
+                  ? const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text('💊', style: TextStyle(fontSize: 40)),
+                          SizedBox(height: 8),
+                          Text('No medicine history yet.',
+                              style: TextStyle(fontSize: 14, color: AppColors.onSurfaceVariant)),
+                          SizedBox(height: 4),
+                          Text('Add a medicine above to start tracking.',
+                              style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ),
+                    )
+                  : ListView.separated(
+                      controller: scrollCtrl,
+                      padding: const EdgeInsets.fromLTRB(16, 10, 16, 32),
+                      itemCount: days.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      itemBuilder: (_, i) {
+                        final day = days[i] as Map<String, dynamic>;
+                        final taken = day['taken'] as List<dynamic>;
+                        final missed = day['missed'] as List<dynamic>;
+                        final upcoming = (day['upcoming'] as List<dynamic>?) ?? [];
+                        final total = day['total'] as int;
+                        final takenCount = day['taken_count'] as int;
+                        final complete = day['complete'] as bool;
+                        final partial = takenCount > 0 && !complete;
+                        final hasMissed = missed.isNotEmpty;
+                        final pct = total == 0 ? 0.0 : (takenCount / total).clamp(0.0, 1.0);
+                        final isExpanded = _expandedIndices.contains(i);
+
+                        final accent = complete
+                            ? AppColors.primary
+                            : partial
+                                ? const Color(0xFFFFB74D)
+                                : hasMissed ? AppColors.error : const Color(0xFFFFB74D);
+
+                        return GestureDetector(
+                          onTap: () => setState(() {
+                            if (isExpanded) {
+                              _expandedIndices.remove(i);
+                            } else {
+                              _expandedIndices.add(i);
+                            }
+                          }),
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              color: AppColors.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(16),
+                              border: complete
+                                  ? Border.all(color: AppColors.primary.withOpacity(0.4), width: 1.5)
+                                  : null,
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              Text(_fmtDate(day['date'] as String),
+                                                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                                              if (complete) ...[
+                                                const SizedBox(width: 6),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                                  decoration: BoxDecoration(
+                                                    color: AppColors.primary.withOpacity(0.18),
+                                                    borderRadius: BorderRadius.circular(99),
+                                                  ),
+                                                  child: const Text('✅ All taken', style: TextStyle(fontSize: 9, color: AppColors.primary, fontWeight: FontWeight.w700)),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            partial
+                                                ? '$takenCount/$total taken'
+                                                : complete
+                                                    ? 'All medicines taken'
+                                                    : upcoming.isNotEmpty ? '${upcoming.length} upcoming' : 'Missed',
+                                            style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    Column(
+                                      crossAxisAlignment: CrossAxisAlignment.end,
+                                      children: [
+                                        Text(
+                                          '$takenCount/$total',
+                                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: accent),
+                                        ),
+                                        Text(
+                                          complete ? '🎯 Goal' : missed.isNotEmpty ? '${missed.length} missed' : upcoming.isNotEmpty ? '${upcoming.length} upcoming' : '—',
+                                          style: TextStyle(fontSize: 9, color: accent.withOpacity(0.8), fontWeight: FontWeight.w600),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Icon(
+                                      isExpanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                                      size: 18, color: AppColors.onSurfaceVariant,
+                                    ),
+                                  ],
+                                ),
+
+                                const SizedBox(height: 8),
+
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(99),
+                                  child: LinearProgressIndicator(
+                                    value: pct,
+                                    minHeight: 5,
+                                    backgroundColor: AppColors.surfaceContainer,
+                                    valueColor: AlwaysStoppedAnimation(accent),
+                                  ),
+                                ),
+
+                                if (isExpanded) ...[
+                                  const SizedBox(height: 10),
+                                  const Divider(height: 1, color: AppColors.outline),
+                                  const SizedBox(height: 8),
+                                  ...taken.map((e) {
+                                    final entry = e as Map<String, dynamic>;
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.check_circle_rounded, size: 14, color: AppColors.primary),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              entry['name'] as String,
+                                              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface),
+                                            ),
+                                          ),
+                                          Text(
+                                            entry['taken_at'] as String? ?? '',
+                                            style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                                  ...upcoming.map((e) {
+                                    final entry = e as Map<String, dynamic>;
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: Row(
+                                        children: [
+                                          const Icon(Icons.access_time_outlined, size: 14, color: AppColors.primary),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              entry['name'] as String,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                                color: AppColors.onSurfaceVariant.withOpacity(0.8),
+                                              ),
+                                            ),
+                                          ),
+                                          Text(entry['reminder_time'] as String? ?? 'upcoming',
+                                              style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                                  ...missed.map((e) {
+                                    final entry = e as Map<String, dynamic>;
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 6),
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.cancel_outlined, size: 14, color: AppColors.error.withOpacity(0.7)),
+                                          const SizedBox(width: 8),
+                                          Expanded(
+                                            child: Text(
+                                              entry['name'] as String,
+                                              style: TextStyle(
+                                                fontSize: 12,
+                                                fontWeight: FontWeight.w500,
+                                                color: AppColors.onSurfaceVariant.withOpacity(0.8),
+                                                decoration: TextDecoration.lineThrough,
+                                              ),
+                                            ),
+                                          ),
+                                          const Text('missed',
+                                              style: TextStyle(fontSize: 10, color: AppColors.error)),
                                         ],
                                       ),
                                     );

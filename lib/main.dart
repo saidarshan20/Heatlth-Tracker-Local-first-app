@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'services/auto_backup_service.dart';
 import 'services/database_service.dart';
 import 'services/gemini_service.dart';
 import 'services/notification_service.dart';
@@ -17,6 +18,9 @@ void main() async {
   await DatabaseService.initPlatform();
   await DatabaseService.database; // init DB
   await DatabaseService.seedDefaultReminders();
+  // Best-effort: write a JSON snapshot of all data to external storage on
+  // every launch. Failures are swallowed so a flaky disk never blocks startup.
+  await AutoBackupService.runOnStartup();
   GeminiService.init();
   await NotificationService.init();
   await NotificationService.rescheduleAll();
@@ -47,15 +51,39 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
+/// One entry per top-level tab. Add a new tab by appending one row.
+class _TabConfig {
+  final IconData icon;
+  final String label;
+  final Widget screen;
+  const _TabConfig({required this.icon, required this.label, required this.screen});
+}
+
+const _tabs = <_TabConfig>[
+  _TabConfig(icon: Icons.home_rounded,      label: 'Home',    screen: HomeScreen()),
+  _TabConfig(icon: Icons.edit_rounded,      label: 'Log',     screen: LogScreen()),
+  _TabConfig(icon: Icons.favorite_rounded,  label: 'Health',  screen: HealthScreen()),
+  _TabConfig(icon: Icons.bar_chart_rounded, label: 'Reports', screen: ReportsScreen()),
+];
+
 class _AppShellState extends State<AppShell> {
   int _currentIndex = 0;
+  final PageController _pageCtrl = PageController();
 
-  final _screens = const [
-    HomeScreen(),
-    LogScreen(),
-    HealthScreen(),
-    ReportsScreen(),
-  ];
+  @override
+  void dispose() {
+    _pageCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onTabTap(int i) {
+    if (_currentIndex == i) return;
+    _pageCtrl.animateToPage(
+      i,
+      duration: const Duration(milliseconds: 280),
+      curve: Curves.easeOutCubic,
+    );
+  }
 
   void _showQuickLogSheet() {
     final ctrl = TextEditingController();
@@ -156,24 +184,32 @@ class _AppShellState extends State<AppShell> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: SafeArea(child: _screens[_currentIndex]),
+      body: SafeArea(
+        child: PageView.builder(
+          controller: _pageCtrl,
+          itemCount: _tabs.length,
+          onPageChanged: (i) => setState(() => _currentIndex = i),
+          physics: const ClampingScrollPhysics(),
+          itemBuilder: (_, i) => _tabs[i].screen,
+        ),
+      ),
       floatingActionButton: _currentIndex == 0
           ? FloatingActionButton(
               onPressed: _showQuickLogSheet,
               backgroundColor: AppColors.primary,
               foregroundColor: AppColors.surface,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: const Icon(Icons.add),
+              child: const Icon(Icons.add_a_photo_rounded),
             )
           : null,
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        onTap: (i) => setState(() => _currentIndex = i),
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home_rounded), label: 'Home'),
-          BottomNavigationBarItem(icon: Icon(Icons.edit_rounded), label: 'Log'),
-          BottomNavigationBarItem(icon: Icon(Icons.favorite_rounded), label: 'Health'),
-          BottomNavigationBarItem(icon: Icon(Icons.bar_chart_rounded), label: 'Reports'),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _currentIndex,
+        onDestinationSelected: _onTabTap,
+        height: 64,
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
+        destinations: [
+          for (final t in _tabs)
+            NavigationDestination(icon: Icon(t.icon), label: t.label),
         ],
       ),
     );

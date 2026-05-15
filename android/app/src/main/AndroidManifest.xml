@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM"/>
     <uses-permission android:name="android.permission.USE_EXACT_ALARM"/>
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <application
         android:label="Health Tracker"
         android:name="${applicationName}"
@@ -34,6 +36,9 @@
             </intent-filter>
         </receiver>
         <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
+        <!-- Native single-shot alarm receiver — replaces flutter_local_notifications'
+             scheduling for daily reminders on ColorOS. See AlarmScheduler.kt. -->
+        <receiver android:name=".AlarmReceiver" android:exported="false" />
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />

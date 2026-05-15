@@ -58,3 +58,7 @@ from_old_tracker.db
 
 # Log files and directories
 logs/
+
+# Reference files
+overall_flow.txt
+refer_NotificationReceiver.kt

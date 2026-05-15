@@ -1,4 +1,5 @@
 // ignore_for_file: avoid_print
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -7,12 +8,16 @@ import 'database_service.dart';
 
 class NotificationService {
   static final _plugin = FlutterLocalNotificationsPlugin();
+  // Native AlarmManager bridge — used for ALL scheduled reminders. The
+  // flutter_local_notifications plugin remains only for live chronometer-style
+  // notifications (fasting, sleep). See android/app/.../AlarmScheduler.kt.
+  static const _alarmChannel = MethodChannel('health_tracker/alarms');
   static bool _initialized = false;
   static bool _isRescheduling = false;
   static DateTime? _lastReschedule;
 
-  // Reserved ID for the live fasting notification
   static const int fastingNotificationId = 8888;
+  static const int sleepReminderNotifId = 9002;
 
   static Future<void> init() async {
     if (_initialized) return;
@@ -53,6 +58,9 @@ class NotificationService {
     return enabled ?? false;
   }
 
+  /// Schedules a daily-repeating reminder via the native AlarmManager bridge.
+  /// Fires once at the next hour:minute (today if not yet passed, else
+  /// tomorrow), and the native receiver re-arms it for +24h after each fire.
   static Future<void> scheduleDailyNotification({
     required int id,
     required String title,
@@ -60,38 +68,23 @@ class NotificationService {
     required int hour,
     required int minute,
   }) async {
-    final now = tz.TZDateTime.now(tz.local);
-    var scheduled = tz.TZDateTime(tz.local, now.year, now.month, now.day, hour, minute);
-    if (scheduled.isBefore(now)) {
-      scheduled = scheduled.add(const Duration(days: 1));
+    print('Scheduling notification #$id "$title" at $hour:${minute.toString().padLeft(2, '0')} (native)');
+    try {
+      await _alarmChannel.invokeMethod('schedule', {
+        'id': id,
+        'title': title,
+        'body': body,
+        'hour': hour,
+        'minute': minute,
+        'fromTomorrow': false,
+      });
+    } on PlatformException catch (e) {
+      print('Alarm schedule failed #$id: ${e.code} ${e.message}');
     }
-
-    print('Scheduling notification #$id "$title" at $scheduled (local: ${tz.local.name})');
-
-    await _plugin.zonedSchedule(
-      id: id,
-      title: title,
-      body: body,
-      scheduledDate: scheduled,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'health_tracker_reminders',
-          'Health Tracker Reminders',
-          channelDescription: 'Medicine, water, and meal reminders',
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/launcher_icon',
-          playSound: true,
-          enableVibration: true,
-        ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.alarmClock,
-      matchDateTimeComponents: DateTimeComponents.time,
-    );
   }
 
   /// Like [scheduleDailyNotification] but always starts from tomorrow.
-  /// Use this after a medicine is marked as taken so today's alarm is skipped.
+  /// Use this after a medicine/water/meal is marked done so today's alarm is skipped.
   static Future<void> scheduleDailyNotificationFromTomorrow({
     required int id,
     required String title,
@@ -99,35 +92,38 @@ class NotificationService {
     required int hour,
     required int minute,
   }) async {
-    final now = tz.TZDateTime.now(tz.local);
-    // Force tomorrow regardless of current time
-    final tomorrow = now.add(const Duration(days: 1));
-    final scheduled = tz.TZDateTime(tz.local, tomorrow.year, tomorrow.month, tomorrow.day, hour, minute);
+    print('Scheduling (tomorrow) notification #$id "$title" at $hour:${minute.toString().padLeft(2, '0')} (native)');
+    try {
+      await _alarmChannel.invokeMethod('schedule', {
+        'id': id,
+        'title': title,
+        'body': body,
+        'hour': hour,
+        'minute': minute,
+        'fromTomorrow': true,
+      });
+    } on PlatformException catch (e) {
+      print('Alarm tomorrow-schedule failed #$id: ${e.code} ${e.message}');
+    }
+  }
 
-    print('Scheduling (tomorrow) notification #$id "$title" at $scheduled');
+  /// True if Android will allow exact alarms (Android 12+ permission gate).
+  static Future<bool> canScheduleExactAlarms() async {
+    try {
+      final ok = await _alarmChannel.invokeMethod<bool>('canScheduleExact');
+      return ok ?? true;
+    } on PlatformException {
+      return true;
+    }
+  }
 
-    await _plugin.zonedSchedule(
-      id: id,
-      title: title,
-      body: body,
-      scheduledDate: scheduled,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'health_tracker_reminders',
-          'Health Tracker Reminders',
-          channelDescription: 'Medicine, water, and meal reminders',
-          importance: Importance.high,
-          priority: Priority.high,
-          icon: '@mipmap/launcher_icon',
-          playSound: true,
-          enableVibration: true,
-        ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.alarmClock,
-      // NO matchDateTimeComponents — this is a one-shot for tomorrow only.
-      // The next rescheduleAll() (on app startup or midnight rollover) will
-      // re-create the daily-repeating alarm via scheduleDailyNotification().
-    );
+  /// Opens the system "Allow exact alarms" settings page (Android 12+).
+  static Future<void> requestExactAlarmPermission() async {
+    try {
+      await _alarmChannel.invokeMethod('requestExactPermission');
+    } on PlatformException catch (e) {
+      print('requestExactPermission failed: ${e.message}');
+    }
   }
 
   /// Send an immediate test notification
@@ -152,11 +148,26 @@ class NotificationService {
   }
 
   static Future<void> cancelNotification(int id) async {
+    // Cancel both the posted notification (if any) and any pending native alarm.
     await _plugin.cancel(id: id);
+    try {
+      await _alarmChannel.invokeMethod('cancel', {'id': id});
+    } on PlatformException catch (e) {
+      print('Alarm cancel failed #$id: ${e.message}');
+    }
   }
 
   static Future<void> cancelAll() async {
     await _plugin.cancelAll();
+    // Native alarms are id-scoped; rescheduleAll's per-id cancel handles them.
+  }
+
+  /// Native-only cancel — used inside rescheduleAll to clear AlarmManager
+  /// pendings without also touching the flutter_local_notifications side.
+  static Future<void> _cancelNative(int id) async {
+    try {
+      await _alarmChannel.invokeMethod('cancel', {'id': id});
+    } on PlatformException catch (_) {/* ignore */}
   }
 
   /// Shows (or updates) a persistent live-fasting notification.
@@ -293,7 +304,7 @@ class NotificationService {
           enableVibration: true,
         ),
       ),
-      androidScheduleMode: AndroidScheduleMode.alarmClock,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
       matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
     );
   }
@@ -364,6 +375,63 @@ class NotificationService {
 
   static Future<void> cancelSummaryNotification() async {
     await _plugin.cancel(id: summaryNotifId);
+  }
+
+  /// Schedules (or cancels) a daily sleep reminder notification.
+  /// Skips today if a sleep session is already active or was suppressed
+  /// (e.g. the user manually started sleep before the scheduled reminder).
+  static Future<void> scheduleSleepReminderIfEnabled() async {
+    final enabled = await DatabaseService.getSettingBool('sleep_reminder_enabled', false);
+    if (!enabled) {
+      await _plugin.cancel(id: sleepReminderNotifId);
+      return;
+    }
+    final hour = await DatabaseService.getSettingInt('sleep_reminder_hour', 23);
+    final minute = await DatabaseService.getSettingInt('sleep_reminder_minute', 0);
+
+    // Skip today if user is already sleeping or has marked today as suppressed.
+    final activeSleep = await DatabaseService.getActiveSleep();
+    final suppressedToday = await DatabaseService.isNotifSuppressedToday(sleepReminderNotifId);
+    if (activeSleep != null || suppressedToday) {
+      await scheduleDailyNotificationFromTomorrow(
+        id: sleepReminderNotifId,
+        title: '🌙 Time to sleep!',
+        body: 'Rest is as important as nutrition. Head to bed soon.',
+        hour: hour,
+        minute: minute,
+      );
+      print('Sleep reminder deferred to tomorrow (active=$activeSleep, suppressedToday=$suppressedToday)');
+      return;
+    }
+
+    await scheduleDailyNotification(
+      id: sleepReminderNotifId,
+      title: '🌙 Time to sleep!',
+      body: 'Rest is as important as nutrition. Head to bed soon.',
+      hour: hour,
+      minute: minute,
+    );
+    print('Scheduled sleep reminder at $hour:${minute.toString().padLeft(2, '0')}');
+  }
+
+  /// Called when the user manually starts a sleep session. Cancels today's
+  /// sleep reminder and reschedules it from tomorrow so it doesn't fire while
+  /// they're already in bed.
+  static Future<void> suppressSleepReminderForToday() async {
+    final enabled = await DatabaseService.getSettingBool('sleep_reminder_enabled', false);
+    await cancelNotification(sleepReminderNotifId);
+    await DatabaseService.suppressNotifForToday(sleepReminderNotifId);
+    if (!enabled) return;
+    final hour = await DatabaseService.getSettingInt('sleep_reminder_hour', 23);
+    final minute = await DatabaseService.getSettingInt('sleep_reminder_minute', 0);
+    await scheduleDailyNotificationFromTomorrow(
+      id: sleepReminderNotifId,
+      title: '🌙 Time to sleep!',
+      body: 'Rest is as important as nutrition. Head to bed soon.',
+      hour: hour,
+      minute: minute,
+    );
+    print('Suppressed sleep reminder — user started sleep early');
   }
 
   static const int _waterSuppressionWindowMinutes = 20;
@@ -454,11 +522,29 @@ class NotificationService {
     try {
       await cancelAll(); // Clean slate to avoid duplicates or orphaned alarms
 
+      // Also cancel native alarms for every ID we know how to schedule. Native
+      // alarms are managed by AlarmManager and aren't touched by cancelAll().
+      // We iterate medicines + reminders (active AND inactive) + singletons
+      // so disabled-but-previously-scheduled IDs are cleared.
+      final allMeds = await DatabaseService.getMedicines();
+      final allReminders = await DatabaseService.getReminders();
+      for (final m in allMeds) {
+        await _cancelNative(1000 + (m['id'] as int));
+      }
+      for (final r in allReminders) {
+        final id = r['id'] as int;
+        await _cancelNative(2000 + id);
+        await _cancelNative(3000 + id);
+      }
+      await _cancelNative(sleepReminderNotifId);
+      await _cancelNative(summaryNotifId);
+      await _cancelNative(weightReminderNotifId);
+
       // Remove stale suppression rows from previous days
       await DatabaseService.clearExpiredSuppressions();
 
       // Schedule medicine reminders
-      final medicines = await DatabaseService.getMedicines();
+      final medicines = allMeds;
       for (final med in medicines) {
         final parts = (med['reminder_time'] as String).split(':');
         if (parts.length == 2) {
@@ -546,6 +632,24 @@ class NotificationService {
 
       // Schedule daily summary notification if enabled
       await scheduleDailySummaryIfEnabled();
+
+      // Schedule sleep reminder if enabled
+      await scheduleSleepReminderIfEnabled();
+
+      // Restore live fasting notification — rescheduleAll cancels ALL first
+      if (activeFast != null) {
+        final fastStart = DateTime.parse(activeFast['start_time'] as String);
+        await showFastingNotification(fastStart);
+        print('Restored fasting live notification after rescheduleAll');
+      }
+
+      // Restore live sleep notification — same reason
+      final activeSleep = await DatabaseService.getActiveSleep();
+      if (activeSleep != null) {
+        final sleepStart = DateTime.parse(activeSleep['start_time'] as String);
+        await showSleepNotification(sleepStart);
+        print('Restored sleep live notification after rescheduleAll');
+      }
 
       print('Rescheduled ${medicines.length} medicine + ${reminders.where((r) => (r['active'] as int) == 1).length} other reminders');
     } finally {

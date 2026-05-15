@@ -32,6 +32,20 @@ android {
         multiDexEnabled = true
     }
 
+    signingConfigs {
+        // Pinned debug signing config. Same well-known Android defaults that
+        // adb/Gradle recognize, but the keystore is now a file in the repo
+        // rather than something Flutter regenerates per-machine. This keeps
+        // every `flutter run` an upgrade install instead of a forced reinstall.
+        // DO NOT use these values for release builds.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

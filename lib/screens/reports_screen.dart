@@ -16,6 +16,7 @@ class ReportsScreen extends StatefulWidget {
 class _ReportsScreenState extends State<ReportsScreen> {
   Map<String, dynamic>? _stats;
   int _medStreak = 0;
+  int _medBestStreak = 0;
   String? _aiInsights;
   String? _mealPlan;
   bool _loadingPlan = false;
@@ -40,7 +41,9 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
   Future<void> _load() async {
     final stats = await DatabaseService.getWeeklyStats();
-    final streak = await DatabaseService.getMedicineStreak();
+    final streaks = await DatabaseService.refreshMedicineStreaks();
+    final streak = streaks.current;
+    final bestStreak = streaks.best;
 
     // BMI calculation
     final h = await DatabaseService.getSettingDouble('height_cm', 0);
@@ -56,6 +59,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     setState(() {
       _stats = stats;
       _medStreak = streak;
+      _medBestStreak = bestStreak;
       _heightCm = h > 0 ? h : null;
       _latestWeight = latestW;
       _bmi = bmi;
@@ -135,50 +139,85 @@ class _ReportsScreenState extends State<ReportsScreen> {
               const SizedBox(height: 12),
               SizedBox(
                 height: 120,
-                child: BarChart(
-                  BarChartData(
-                    barGroups: List.generate(7, (i) {
-                      final val = (_stats!['dailyCals'] as List<int>)[i].toDouble();
-                      return BarChartGroupData(
-                        x: i,
-                        barRods: [
-                          BarChartRodData(
-                            toY: val,
-                            width: 20,
-                            borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
-                            color: i == 6 ? AppColors.primary : AppColors.surfaceContainerHigh,
-                          ),
-                        ],
-                      );
-                    }),
-                    titlesData: FlTitlesData(
-                      leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          getTitlesWidget: (v, _) => Text(
-                            reordered[v.toInt()],
-                            style: TextStyle(
-                              fontSize: 10, fontFamily: 'DMSans',
-                              color: v.toInt() == 6 ? AppColors.primary : AppColors.onSurfaceVariant,
-                              fontWeight: v.toInt() == 6 ? FontWeight.w700 : FontWeight.w400,
+                child: Builder(builder: (_) {
+                  final goal = DashboardProvider.calGoal.toDouble();
+                  final dailyCals = (_stats!['dailyCals'] as List<int>);
+                  final maxVal = dailyCals.fold<int>(0, (a, b) => b > a ? b : a).toDouble();
+                  // Pin maxY so the goal dashed line is always visible AND a
+                  // small bar (e.g. 300 kcal) doesn't stretch to the top.
+                  // Headroom of 1.15x over the larger of (goal, today's max).
+                  final maxY = (maxVal > goal ? maxVal : goal) * 1.15;
+                  return BarChart(
+                    BarChartData(
+                      maxY: maxY,
+                      minY: 0,
+                      barGroups: List.generate(7, (i) {
+                        final val = dailyCals[i].toDouble();
+                        final isToday = i == 6;
+                        final overGoal = val > goal;
+                        final color = overGoal
+                            ? AppColors.error
+                            : (isToday ? AppColors.primary : AppColors.surfaceContainerHigh);
+                        return BarChartGroupData(
+                          x: i,
+                          barRods: [
+                            BarChartRodData(
+                              toY: val,
+                              width: 20,
+                              borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
+                              color: color,
+                              // Faint background rod hints at the full chart range,
+                              // so a 300 kcal bar reads as "small", not "max".
+                              backDrawRodData: BackgroundBarChartRodData(
+                                show: true,
+                                toY: maxY,
+                                color: AppColors.surfaceContainerHigh.withValues(alpha: 0.25),
+                              ),
+                            ),
+                          ],
+                        );
+                      }),
+                      titlesData: FlTitlesData(
+                        leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            getTitlesWidget: (v, _) => Text(
+                              reordered[v.toInt()],
+                              style: TextStyle(
+                                fontSize: 10, fontFamily: 'DMSans',
+                                color: v.toInt() == 6 ? AppColors.primary : AppColors.onSurfaceVariant,
+                                fontWeight: v.toInt() == 6 ? FontWeight.w700 : FontWeight.w400,
+                              ),
                             ),
                           ),
                         ),
                       ),
+                      borderData: FlBorderData(show: false),
+                      gridData: const FlGridData(show: false),
+                      barTouchData: BarTouchData(enabled: false),
+                      extraLinesData: ExtraLinesData(
+                        horizontalLines: [
+                          HorizontalLine(
+                            y: goal,
+                            color: AppColors.primary.withValues(alpha: 0.7),
+                            strokeWidth: 1.5,
+                            dashArray: const [5, 5],
+                            label: HorizontalLineLabel(
+                              show: true,
+                              alignment: Alignment.topRight,
+                              padding: const EdgeInsets.only(right: 4, bottom: 2),
+                              style: const TextStyle(fontSize: 9, color: AppColors.primary, fontWeight: FontWeight.w600),
+                              labelResolver: (_) => 'Goal',
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                    borderData: FlBorderData(show: false),
-                    gridData: const FlGridData(show: false),
-                    barTouchData: BarTouchData(enabled: false),
-                    extraLinesData: ExtraLinesData(
-                      horizontalLines: [
-                        HorizontalLine(y: DashboardProvider.calGoal.toDouble(), color: AppColors.outline, strokeWidth: 1, dashArray: [5, 5]),
-                      ],
-                    ),
-                  ),
-                ),
+                  );
+                }),
               ),
               const SizedBox(height: 10),
               Row(
@@ -199,7 +238,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
             const SizedBox(width: 8),
             Expanded(child: AppCard(child: _statCard('Avg Water', '${(_stats!['avgWater'] / 1000).toStringAsFixed(1)}L', 'goal: 3L', AppColors.water))),
             const SizedBox(width: 8),
-            Expanded(child: AppCard(child: _statCard('Med Streak', '$_medStreak${_streakBadge(_medStreak)}', 'days', AppColors.warning))),
+            Expanded(child: AppCard(child: _statCard(
+              'Med Streak',
+              '$_medStreak${_streakBadge(_medStreak)}',
+              _medBestStreak > _medStreak
+                  ? '${_medBestStreak - _medStreak + 1} to beat $_medBestStreak'
+                  : _medBestStreak > 0 ? '🏆 best: $_medBestStreak' : 'days',
+              AppColors.warning,
+            ))),
           ],
         ),
 

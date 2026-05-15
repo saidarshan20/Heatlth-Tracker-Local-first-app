@@ -30,9 +30,15 @@ class DashboardProvider extends ChangeNotifier {
   List<Map<String, dynamic>> medicines = [];
   List<int> takenMedIds = [];
   List<Map<String, dynamic>> commonMeals = [];
+  List<Map<String, dynamic>> pinnedMeals = [];
   List<Map<String, dynamic>> waterEntries = [];
   List<Map<String, dynamic>> medicineLogsToday = [];
   int medStreak = 0;
+
+  // Pinned drink
+  String pinnedDrink = '';    // e.g. 'coke_zero', 'coke', 'thumbs_up', 'diet_coke', 'other', or '' (none)
+  int pinnedDrinkMl = 250;
+  String? pinnedDrinkName;    // only used when pinnedDrink == 'other'
 
   String get today => DateFormat('yyyy-MM-dd').format(DateTime.now());
 
@@ -60,9 +66,14 @@ class DashboardProvider extends ChangeNotifier {
     medicines = await DatabaseService.getMedicines();
     takenMedIds = await DatabaseService.getTakenMedicineIds(today);
     commonMeals = await DatabaseService.getCommonMeals();
+    pinnedMeals = await DatabaseService.getPinnedMeals();
     waterEntries = await DatabaseService.getWaterForDate(today);
     medicineLogsToday = await DatabaseService.getMedicineLogsForDate(today);
     medStreak = await DatabaseService.getMedicineStreak();
+
+    pinnedDrink = await DatabaseService.getSetting('pinned_drink') ?? '';
+    pinnedDrinkMl = await DatabaseService.getSettingInt('pinned_drink_ml', 250);
+    pinnedDrinkName = await DatabaseService.getSetting('pinned_drink_name');
 
     notifyListeners();
   }
@@ -79,11 +90,95 @@ class DashboardProvider extends ChangeNotifier {
   }
 
   Future<void> addThumbsUp() async {
-    // Log 250ml soft drink water
-    await DatabaseService.addWater(today, 250, type: 'soft_drink');
-    // Log food entry: Thumbs Up 250ml = 100kcal, 0P, 25C, 0F
-    await DatabaseService.addFood(today, 'Thumbs Up 250ml', 100, 0, 25, 0);
+    await DatabaseService.addWater(today, 250, type: 'soft_drink', drinkName: 'thumbs_up');
+    await DatabaseService.addFood(today, 'Thumbs Up 250ml', 110, 0, 28, 0);
     await refresh();
+  }
+
+  // Hardcoded nutrition per 100ml for known drinks
+  static const _drinkNutrition = {
+    'thumbs_up': {'kcal': 44.0, 'carbs': 11.0, 'protein': 0.0, 'fat': 0.0},
+    'coke':      {'kcal': 42.0, 'carbs': 10.6, 'protein': 0.0, 'fat': 0.0},
+    'coke_zero': {'kcal': 0.3,  'carbs': 0.0,  'protein': 0.0, 'fat': 0.0},
+    'diet_coke': {'kcal': 0.3,  'carbs': 0.1,  'protein': 0.1, 'fat': 0.0},
+  };
+
+  static String drinkDisplayName(String key, {String? otherName}) {
+    switch (key) {
+      case 'thumbs_up': return 'Thumbs Up';
+      case 'coke':      return 'Coke';
+      case 'coke_zero': return 'Coke Zero';
+      case 'diet_coke': return 'Diet Coke';
+      case 'other':     return otherName ?? 'Other';
+      default:          return 'Water';
+    }
+  }
+
+  static String drinkEmoji(String key) {
+    switch (key) {
+      case 'thumbs_up': return '🥤';
+      case 'coke':      return '🥤';
+      case 'coke_zero': return '🫙';
+      case 'diet_coke': return '🥤';
+      case 'other':     return '🧃';
+      default:          return '💧';
+    }
+  }
+
+  /// Logs a drink entry. For known drinks, calculates nutrition from hardcoded table.
+  /// For 'other', caller must supply [overrideKcal] and [overrideCarbs].
+  Future<void> addDrinkEntry(int ml, String drinkKey, {
+    String? otherName,
+    int? overrideKcal,
+    int? overrideCarbs,
+    int? overrideProtein,
+    int? overrideFat,
+  }) async {
+    await DatabaseService.addWater(today, ml, type: 'soft_drink',
+        drinkName: drinkKey == 'other' ? (otherName ?? 'other') : drinkKey);
+
+    int kcal, carbs, protein, fat;
+    if (drinkKey == 'other') {
+      kcal    = overrideKcal    ?? 0;
+      carbs   = overrideCarbs   ?? 0;
+      protein = overrideProtein ?? 0;
+      fat     = overrideFat     ?? 0;
+    } else {
+      final n = _drinkNutrition[drinkKey] ?? {};
+      kcal    = ((n['kcal']    ?? 0.0) * ml / 100).round();
+      carbs   = ((n['carbs']   ?? 0.0) * ml / 100).round();
+      protein = ((n['protein'] ?? 0.0) * ml / 100).round();
+      fat     = ((n['fat']     ?? 0.0) * ml / 100).round();
+    }
+
+    final name = drinkDisplayName(drinkKey, otherName: otherName);
+    if (kcal > 0 || carbs > 0 || protein > 0 || fat > 0) {
+      await DatabaseService.addFood(today, '$name ${ml}ml', kcal, protein, carbs, fat);
+    }
+    await NotificationService.suppressUpcomingWaterReminder();
+    await refresh();
+  }
+
+  Future<void> setPinnedDrink(String drinkKey, int ml, {String? otherName}) async {
+    await DatabaseService.setSetting('pinned_drink', drinkKey);
+    await DatabaseService.setSetting('pinned_drink_ml', '$ml');
+    if (drinkKey == 'other' && otherName != null) {
+      await DatabaseService.setSetting('pinned_drink_name', otherName);
+    } else {
+      await DatabaseService.setSetting('pinned_drink_name', '');
+    }
+    pinnedDrink = drinkKey;
+    pinnedDrinkMl = ml;
+    pinnedDrinkName = drinkKey == 'other' ? otherName : null;
+    notifyListeners();
+  }
+
+  Future<void> clearPinnedDrink() async {
+    await DatabaseService.setSetting('pinned_drink', '');
+    pinnedDrink = '';
+    pinnedDrinkMl = 250;
+    pinnedDrinkName = null;
+    notifyListeners();
   }
 
   Future<void> addFood(String item, int cal, int p, int c, int f, {String? rawInput}) async {
@@ -131,6 +226,9 @@ class DashboardProvider extends ChangeNotifier {
     // Persist suppression so rescheduleAll() on next app restart keeps this
     // alarm on tomorrow (not re-added for today)
     await DatabaseService.suppressNotifForToday(notifId);
+
+    // Bump all-time best streak if today's completion exceeded the record.
+    await DatabaseService.refreshMedicineStreaks();
 
     await refresh();
   }

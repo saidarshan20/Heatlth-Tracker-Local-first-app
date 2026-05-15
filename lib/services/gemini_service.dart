@@ -1,78 +1,68 @@
 // ignore_for_file: avoid_print
+//
+// AI service — class name kept as `GeminiService` so existing call sites
+// don't churn, but text now routes ONLY through Cerebras `gpt-oss-120b`.
+// Gemini is still used for vision (image_food_service.dart) but is no
+// longer a text fallback (its free tier was unreliable and the quota errors
+// were noisy).
+//
+// .env keys:
+//   CEREBRAS_API_KEY=csk-...
+//   GEMINI_API_KEY=AIza...   (Google native key, used only for image parsing)
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class GeminiService {
-  static GenerativeModel? _jsonModel;
-  static GenerativeModel? _chatModel;
-  static String _apiKey = '';
+  static String _cerebrasKey = '';
 
-  static bool get _isOpenRouter => _apiKey.startsWith('sk-or-');
+  static const _cerebrasUrl = 'https://api.cerebras.ai/v1/chat/completions';
+  // Cerebras model. Llama 3.3 70B isn't available on this tier — `gpt-oss-120b`
+  // is the closest in capability and is blazingly fast (~10ms total on this key).
+  // Other ids available: 'qwen-3-235b-a22b-instruct-2507', 'zai-glm-4.7', 'llama3.1-8b'.
+  static const _cerebrasModel = 'gpt-oss-120b';
 
   static void init() {
-    _apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
-    if (_apiKey.isEmpty) return;
-
-    if (!_isOpenRouter) {
-      _jsonModel = GenerativeModel(
-        model: 'gemini-2.0-flash',
-        apiKey: _apiKey,
-        generationConfig: GenerationConfig(
-          temperature: 0.1,
-          responseMimeType: 'application/json',
-        ),
-      );
-
-      _chatModel = GenerativeModel(
-        model: 'gemini-2.0-flash',
-        apiKey: _apiKey,
-        generationConfig: GenerationConfig(temperature: 0.7),
-      );
-    }
+    _cerebrasKey = dotenv.env['CEREBRAS_API_KEY'] ?? '';
   }
 
+  /// Routes a text prompt to Cerebras. Returns null on failure. Gemini is no
+  /// longer used as a text fallback — its free tier is unreliable, and the
+  /// noisy quota errors confused things. Image parsing still uses Gemini.
   static Future<String?> _generate(String prompt, {bool json = false, double temp = 0.7}) async {
-    if (_apiKey.isEmpty) return null;
+    if (_cerebrasKey.isEmpty) {
+      print('CEREBRAS_API_KEY missing — text AI is disabled');
+      return null;
+    }
+    return await _callCerebras(prompt, json: json, temp: temp);
+  }
 
-    if (_isOpenRouter) {
-      try {
-        final res = await http.post(
-          Uri.parse('https://openrouter.ai/api/v1/chat/completions'),
-          headers: {
-            'Authorization': 'Bearer $_apiKey',
-            'Content-Type': 'application/json',
-          },
-          body: jsonEncode({
-            'model': 'google/gemini-2.0-flash-001',
-            'temperature': temp,
-            if (json) 'response_format': {"type": "json_object"},
-            'messages': [
-              {'role': 'user', 'content': prompt}
-            ]
-          }),
-        );
-        if (res.statusCode == 200) {
-          final data = jsonDecode(res.body);
-          return data['choices'][0]['message']['content'] as String?;
-        }
-        print('OpenRouter API error: ${res.statusCode} ${res.body}');
-        return null;
-      } catch (e) {
-        print('OpenRouter Exception: $e');
-        return null;
+  static Future<String?> _callCerebras(String prompt, {required bool json, required double temp}) async {
+    try {
+      final res = await http.post(
+        Uri.parse(_cerebrasUrl),
+        headers: {
+          'Authorization': 'Bearer $_cerebrasKey',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'model': _cerebrasModel,
+          'temperature': temp,
+          if (json) 'response_format': {'type': 'json_object'},
+          'messages': [
+            {'role': 'user', 'content': prompt}
+          ],
+        }),
+      );
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        return data['choices'][0]['message']['content'] as String?;
       }
-    } else {
-      try {
-        final model = json ? _jsonModel : _chatModel;
-        if (model == null) return null;
-        final response = await model.generateContent([Content.text(prompt)]);
-        return response.text;
-      } catch (e) {
-        print('Gemini SDK Exception: $e');
-        return null;
-      }
+      print('Cerebras API error: ${res.statusCode} ${res.body}');
+      return null;
+    } catch (e) {
+      print('Cerebras exception: $e');
+      return null;
     }
   }
 
@@ -106,7 +96,7 @@ Return ONLY this single JSON object with the COMBINED total of ALL mentioned ite
       }
       return decoded as Map<String, dynamic>;
     } catch (e) {
-      print('Gemini food parse error: $e\\nRaw text: $text');
+      print('Food parse error: $e\nRaw text: $text');
       return null;
     }
   }

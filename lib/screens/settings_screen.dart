@@ -22,11 +22,18 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _notificationsEnabled = false;
+  bool _exactAlarmsAllowed = true;
   List<Map<String, dynamic>> _waterReminders = [];
   List<Map<String, dynamic>> _mealReminders = [];
   List<Map<String, dynamic>> _medicines = [];
-  bool _waterExpanded = false;
-  bool _medExpanded = false;
+
+  // Collapsible states
+  bool _goalsExpanded = false;
+  bool _notifExpanded = false;
+  bool _medRemindersExpanded = false;
+  bool _waterRemindersExpanded = false;
+  bool _mealRemindersExpanded = false;
+
   bool _isExporting = false;
   bool _isImporting = false;
 
@@ -39,14 +46,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _heightCtrl = TextEditingController();
 
   // Summary notification
-  bool _goalsExpanded = false;
   bool _summaryEnabled = false;
   TimeOfDay _summaryTime = const TimeOfDay(hour: 9, minute: 0);
+
+  // Sleep reminder notification
+  bool _sleepReminderEnabled = false;
+  TimeOfDay _sleepReminderTime = const TimeOfDay(hour: 23, minute: 0);
 
   @override
   void initState() {
     super.initState();
     _loadData();
+  }
+
+  String _fmtTime(TimeOfDay t) {
+    return '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -62,26 +76,29 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _loadData() async {
     _notificationsEnabled = await NotificationService.checkPermission();
+    _exactAlarmsAllowed = await NotificationService.canScheduleExactAlarms();
     _waterReminders = await DatabaseService.getReminders(type: 'water');
     _mealReminders = await DatabaseService.getReminders(type: 'meal');
     _medicines = await DatabaseService.getMedicines();
 
-    // Load goals
     _calCtrl.text = '${await DatabaseService.getSettingInt('cal_goal', 1800)}';
     _protCtrl.text = '${await DatabaseService.getSettingInt('prot_goal', 120)}';
     _carbCtrl.text = '${await DatabaseService.getSettingInt('carb_goal', 200)}';
     _fatCtrl.text = '${await DatabaseService.getSettingInt('fat_goal', 60)}';
     _waterCtrl.text = '${await DatabaseService.getSettingInt('water_goal', 3000)}';
 
-    // Load height
     final h = await DatabaseService.getSettingDouble('height_cm', 0);
     _heightCtrl.text = h > 0 ? h.toStringAsFixed(0) : '';
 
-    // Load summary notification config
     _summaryEnabled = await DatabaseService.getSettingBool('summary_enabled', false);
     final sHour = await DatabaseService.getSettingInt('summary_hour', 9);
     final sMin = await DatabaseService.getSettingInt('summary_minute', 0);
     _summaryTime = TimeOfDay(hour: sHour, minute: sMin);
+
+    _sleepReminderEnabled = await DatabaseService.getSettingBool('sleep_reminder_enabled', false);
+    final srHour = await DatabaseService.getSettingInt('sleep_reminder_hour', 23);
+    final srMin = await DatabaseService.getSettingInt('sleep_reminder_minute', 0);
+    _sleepReminderTime = TimeOfDay(hour: srHour, minute: srMin);
 
     if (mounted) setState(() {});
   }
@@ -92,7 +109,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await DatabaseService.setSetting('carb_goal', _carbCtrl.text.trim());
     await DatabaseService.setSetting('fat_goal', _fatCtrl.text.trim());
     await DatabaseService.setSetting('water_goal', _waterCtrl.text.trim());
-    // Reload goals into the provider
     await DashboardProvider.loadGoals();
     if (mounted) {
       context.read<DashboardProvider>().refresh();
@@ -118,7 +134,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final granted = await NotificationService.requestPermission();
     setState(() => _notificationsEnabled = granted);
     if (granted) {
-      // Send a test notification immediately so user sees it works
       await NotificationService.sendTestNotification();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -146,12 +161,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       initialMinute: reminder['minute'] as int,
     );
     if (result != null) {
-      await DatabaseService.updateReminder(
-        reminder['id'] as int,
-        result['label'],
-        result['hour'],
-        result['minute'],
-      );
+      await DatabaseService.updateReminder(reminder['id'] as int, result['label'], result['hour'], result['minute']);
       await NotificationService.rescheduleAll(force: true);
       await _loadData();
     }
@@ -207,10 +217,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     children: [
                       const Icon(Icons.access_time, color: AppColors.primary, size: 20),
                       const SizedBox(width: 12),
-                      Text(
-                        selectedTime.format(ctx),
-                        style: const TextStyle(color: AppColors.onSurface, fontSize: 16, fontWeight: FontWeight.w600),
-                      ),
+                      Text(_fmtTime(selectedTime),
+                          style: const TextStyle(color: AppColors.onSurface, fontSize: 16, fontWeight: FontWeight.w600)),
                       const Spacer(),
                       const Text('Tap to change', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
                     ],
@@ -229,11 +237,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 final label = labelCtrl.text.trim().isEmpty
                     ? (type == 'water' ? 'Water reminder' : 'Meal reminder')
                     : labelCtrl.text.trim();
-                Navigator.pop(ctx, {
-                  'label': label,
-                  'hour': selectedTime.hour,
-                  'minute': selectedTime.minute,
-                });
+                Navigator.pop(ctx, {'label': label, 'hour': selectedTime.hour, 'minute': selectedTime.minute});
               },
               style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
               child: Text(isEdit ? 'Save' : 'Add'),
@@ -248,6 +252,90 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await DatabaseService.deleteReminder(id);
     await NotificationService.rescheduleAll(force: true);
     await _loadData();
+  }
+
+  // ── Shared collapsible card helper ──
+  Widget _collapsibleCard({
+    required String emoji,
+    required String title,
+    required String subtitle,
+    required bool expanded,
+    required VoidCallback onToggle,
+    required Widget body,
+    Widget? trailing,
+  }) {
+    return AppCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          InkWell(
+            onTap: onToggle,
+            borderRadius: BorderRadius.circular(8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('$emoji $title',
+                          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                      const SizedBox(height: 2),
+                      Text(subtitle, style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+                if (trailing != null && expanded) trailing,
+                Icon(
+                  expanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
+                  size: 20, color: AppColors.onSurfaceVariant,
+                ),
+              ],
+            ),
+          ),
+          if (expanded) ...[
+            const SizedBox(height: 12),
+            body,
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _reminderRow({
+    required Map<String, dynamic> r,
+    required String emoji,
+    required Color timeColor,
+  }) {
+    return Dismissible(
+      key: ValueKey('rem_${r['id']}'),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 16),
+        child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
+      ),
+      onDismissed: (_) => _deleteReminder(r['id'] as int),
+      child: InkWell(
+        onTap: () => _editReminder(r),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+          child: Row(
+            children: [
+              Text(emoji, style: const TextStyle(fontSize: 14)),
+              const SizedBox(width: 8),
+              Expanded(child: Text(r['label'] as String, style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
+              Text(
+                '${(r['hour'] as int).toString().padLeft(2, '0')}:${(r['minute'] as int).toString().padLeft(2, '0')}',
+                style: TextStyle(fontSize: 11, color: timeColor, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.edit_outlined, size: 14, color: AppColors.onSurfaceVariant),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   @override
@@ -265,115 +353,86 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   onPressed: () => Navigator.pop(context),
                 ),
                 const SizedBox(width: 4),
-                const Text('Settings', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                const Text('Settings',
+                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
               ],
             ),
             const SizedBox(height: 16),
 
-            // ── Daily Goals (Collapsible) ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+            // ── 1. Daily Goals ──
+            _collapsibleCard(
+              emoji: '🎯',
+              title: 'Daily Goals',
+              subtitle: _goalsExpanded
+                  ? 'Tap to collapse'
+                  : '${_calCtrl.text} kcal · P:${_protCtrl.text}g · ${_waterCtrl.text}ml',
+              expanded: _goalsExpanded,
+              onToggle: () => setState(() => _goalsExpanded = !_goalsExpanded),
+              body: Column(
                 children: [
-                  InkWell(
-                    onTap: () => setState(() => _goalsExpanded = !_goalsExpanded),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('🎯 Daily Goals', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                            const SizedBox(height: 2),
-                            Text(
-                              _goalsExpanded ? 'Tap to collapse' : '${_calCtrl.text} kcal · P:${_protCtrl.text}g · ${_waterCtrl.text}ml',
-                              style: const TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant),
-                            ),
-                          ],
-                        ),
-                        Icon(
-                          _goalsExpanded ? Icons.keyboard_arrow_up_rounded : Icons.keyboard_arrow_down_rounded,
-                          size: 20, color: AppColors.onSurfaceVariant,
-                        ),
-                      ],
+                  Row(children: [
+                    Expanded(child: _goalField('Calories', _calCtrl, 'kcal')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _goalField('Protein', _protCtrl, 'g')),
+                  ]),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(child: _goalField('Carbs', _carbCtrl, 'g')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _goalField('Fat', _fatCtrl, 'g')),
+                  ]),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    Expanded(child: _goalField('Water', _waterCtrl, 'ml')),
+                    const SizedBox(width: 8),
+                    Expanded(child: _goalField('Height', _heightCtrl, 'cm')),
+                  ]),
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () async { await _saveGoals(); await _saveHeight(); },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppColors.primary, foregroundColor: AppColors.surface,
+                        padding: const EdgeInsets.symmetric(vertical: 10),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                      ),
+                      child: const Text('Save Goals', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
                     ),
                   ),
-                  if (_goalsExpanded) ...[
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Expanded(child: _goalField('Calories', _calCtrl, 'kcal')),
-                        const SizedBox(width: 8),
-                        Expanded(child: _goalField('Protein', _protCtrl, 'g')),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(child: _goalField('Carbs', _carbCtrl, 'g')),
-                        const SizedBox(width: 8),
-                        Expanded(child: _goalField('Fat', _fatCtrl, 'g')),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(child: _goalField('Water', _waterCtrl, 'ml')),
-                        const SizedBox(width: 8),
-                        Expanded(child: _goalField('Height', _heightCtrl, 'cm')),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        onPressed: () async {
-                          await _saveGoals();
-                          await _saveHeight();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppColors.primary,
-                          foregroundColor: AppColors.surface,
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        ),
-                        child: const Text('Save Goals', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
-
             const SizedBox(height: 8),
 
-            // ── Notifications Permission ──
-            AppCard(
-              child: Column(
+            // ── 2. Notifications ──
+            _collapsibleCard(
+              emoji: '🔔',
+              title: 'Notifications',
+              subtitle: _notificationsEnabled
+                  ? (_summaryEnabled ? 'Enabled · Summary at ${_fmtTime(_summaryTime)}' : 'Enabled')
+                  : 'Disabled — tap to expand',
+              expanded: _notifExpanded,
+              onToggle: () => setState(() => _notifExpanded = !_notifExpanded),
+              body: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Enable / status row
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('🔔 Notifications', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                            const SizedBox(height: 4),
-                            Text(
-                              _notificationsEnabled ? 'Enabled — reminders are active' : 'Disabled — tap to enable',
-                              style: TextStyle(fontSize: 11, color: _notificationsEnabled ? AppColors.primary : AppColors.error),
-                            ),
-                          ],
+                        child: Text(
+                          _notificationsEnabled ? 'Enabled — reminders are active' : 'Disabled — tap to enable',
+                          style: TextStyle(fontSize: 11,
+                              color: _notificationsEnabled ? AppColors.primary : AppColors.error),
                         ),
                       ),
                       if (!_notificationsEnabled)
                         ElevatedButton(
                           onPressed: _requestPermission,
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                            foregroundColor: AppColors.surface,
+                            backgroundColor: AppColors.primary, foregroundColor: AppColors.surface,
                             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
@@ -383,18 +442,57 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         const Icon(Icons.check_circle, color: AppColors.primary, size: 24),
                     ],
                   ),
+                  // Exact-alarm permission banner — on Android 12+ this is a
+                  // separate permission, and without it ColorOS can fire
+                  // notifications several minutes early.
+                  if (!_exactAlarmsAllowed) ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: AppColors.error.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.error.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.warning_amber_rounded, color: AppColors.error, size: 18),
+                          const SizedBox(width: 8),
+                          const Expanded(
+                            child: Text(
+                              'Reminders may fire early. Tap to allow exact alarms.',
+                              style: TextStyle(fontSize: 11, color: AppColors.error, fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              await NotificationService.requestExactAlarmPermission();
+                              // User returns from system page — re-check.
+                              await Future.delayed(const Duration(milliseconds: 400));
+                              if (mounted) await _loadData();
+                            },
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            child: const Text('Fix', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w700)),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                   if (_notificationsEnabled) ...[
                     const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
                       child: OutlinedButton.icon(
                         onPressed: () async {
+                          final messenger = ScaffoldMessenger.of(context);
                           await NotificationService.sendTestNotification();
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('🔔 Test notification sent! Check your notification bar.')),
-                            );
-                          }
+                          messenger.showSnackBar(
+                            const SnackBar(content: Text('🔔 Test notification sent!')),
+                          );
                         },
                         icon: const Icon(Icons.notifications_active, size: 16),
                         label: const Text('Send Test Notification', style: TextStyle(fontSize: 12)),
@@ -408,184 +506,129 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const SizedBox(height: 8),
                     const Divider(height: 1, color: AppColors.outline),
                     const SizedBox(height: 8),
-                    // ── Daily Summary Toggle ──
-                    Row(
-                      children: [
-                        const Text('📋', style: TextStyle(fontSize: 16)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const Text('Daily Summary', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
-                              Text(
-                                _summaryEnabled
-                                    ? 'Receive at ${_summaryTime.format(context)}'
-                                    : 'Disabled',
-                                style: TextStyle(fontSize: 10, color: _summaryEnabled ? AppColors.primary : AppColors.onSurfaceVariant),
-                              ),
-                            ],
-                          ),
-                        ),
-                        if (_summaryEnabled)
-                          TextButton(
-                            onPressed: () async {
-                              final t = await showTimePicker(context: context, initialTime: _summaryTime);
-                              if (t != null) {
-                                setState(() => _summaryTime = t);
-                                await DatabaseService.setSetting('summary_hour', '${t.hour}');
-                                await DatabaseService.setSetting('summary_minute', '${t.minute}');
-                                await NotificationService.rescheduleAll(force: true);
-                              }
-                            },
-                            style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
-                            child: Text(_summaryTime.format(context), style: const TextStyle(fontSize: 11, color: AppColors.primary)),
-                          ),
-                        Switch(
-                          value: _summaryEnabled,
-                          activeColor: AppColors.primary,
-                          onChanged: (v) async {
-                            setState(() => _summaryEnabled = v);
-                            await DatabaseService.setSettingBool('summary_enabled', v);
-                            await NotificationService.rescheduleAll(force: true);
-                          },
-                        ),
-                      ],
+
+                    // Daily Summary toggle
+                    _notifToggleRow(
+                      emoji: '📋',
+                      title: 'Daily Summary',
+                      subtitle: _summaryEnabled ? 'Yesterday\'s stats at ${_fmtTime(_summaryTime)}' : 'Disabled',
+                      enabled: _summaryEnabled,
+                      time: _summaryEnabled ? _summaryTime : null,
+                      onTimeChanged: (t) async {
+                        setState(() => _summaryTime = t);
+                        await DatabaseService.setSetting('summary_hour', '${t.hour}');
+                        await DatabaseService.setSetting('summary_minute', '${t.minute}');
+                        await NotificationService.rescheduleAll(force: true);
+                      },
+                      onToggled: (v) async {
+                        setState(() => _summaryEnabled = v);
+                        await DatabaseService.setSettingBool('summary_enabled', v);
+                        await NotificationService.rescheduleAll(force: true);
+                      },
+                    ),
+
+                    const SizedBox(height: 4),
+                    const Divider(height: 1, color: AppColors.outline),
+                    const SizedBox(height: 8),
+
+                    // Sleep Reminder toggle
+                    _notifToggleRow(
+                      emoji: '🌙',
+                      title: 'Sleep Reminder',
+                      subtitle: _sleepReminderEnabled ? 'Bedtime reminder at ${_fmtTime(_sleepReminderTime)}' : 'Disabled',
+                      enabled: _sleepReminderEnabled,
+                      time: _sleepReminderEnabled ? _sleepReminderTime : null,
+                      onTimeChanged: (t) async {
+                        setState(() => _sleepReminderTime = t);
+                        await DatabaseService.setSetting('sleep_reminder_hour', '${t.hour}');
+                        await DatabaseService.setSetting('sleep_reminder_minute', '${t.minute}');
+                        await NotificationService.rescheduleAll(force: true);
+                      },
+                      onToggled: (v) async {
+                        setState(() => _sleepReminderEnabled = v);
+                        await DatabaseService.setSettingBool('sleep_reminder_enabled', v);
+                        await NotificationService.rescheduleAll(force: true);
+                      },
                     ),
                   ],
                 ],
               ),
             ),
-
             const SizedBox(height: 8),
 
-            // ── Medicine Reminders ──
-            _buildCollapsibleSection(
+            // ── 3. Medicine Reminders ──
+            _collapsibleCard(
               emoji: '💊',
               title: 'Medicine Reminders',
-              subtitle: 'Auto-synced from your medicines',
-              items: _medicines,
-              expanded: _medExpanded,
-              collapseAfter: 3,
-              onToggle: () => setState(() => _medExpanded = !_medExpanded),
-              itemBuilder: (med) => Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(
-                  children: [
-                    Text(_getMedEmoji(med['type'] as String? ?? 'tablet'), style: const TextStyle(fontSize: 14)),
-                    const SizedBox(width: 8),
-                    Expanded(child: Text(med['name'] as String, style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
-                    Text(med['reminder_time'] as String, style: const TextStyle(fontSize: 11, color: AppColors.primary, fontWeight: FontWeight.w600)),
-                  ],
-                ),
-              ),
+              subtitle: '${_medicines.length} ${_medicines.length == 1 ? 'medicine' : 'medicines'} — auto-synced',
+              expanded: _medRemindersExpanded,
+              onToggle: () => setState(() => _medRemindersExpanded = !_medRemindersExpanded),
+              body: _medicines.isEmpty
+                  ? const Text('No medicines added. Go to Health → + Add.',
+                      style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant))
+                  : Column(
+                      children: _medicines.map((med) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(children: [
+                          Text(_getMedEmoji(med['type'] as String? ?? 'tablet'),
+                              style: const TextStyle(fontSize: 14)),
+                          const SizedBox(width: 8),
+                          Expanded(child: Text(med['name'] as String,
+                              style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
+                          Text(med['reminder_time'] as String,
+                              style: const TextStyle(fontSize: 11, color: AppColors.primary, fontWeight: FontWeight.w600)),
+                        ]),
+                      )).toList(),
+                    ),
             ),
-
             const SizedBox(height: 8),
 
-            // ── Water Reminders ──
-            _buildCollapsibleSection(
+            // ── 4. Water Reminders ──
+            _collapsibleCard(
               emoji: '💧',
               title: 'Water Reminders',
-              subtitle: '${_waterReminders.length} reminders set',
-              items: _waterReminders,
-              expanded: _waterExpanded,
-              collapseAfter: 4,
-              onToggle: () => setState(() => _waterExpanded = !_waterExpanded),
-              onAdd: () => _addReminder('water'),
-              itemBuilder: (r) => Dismissible(
-                key: ValueKey('wr_${r['id']}'),
-                direction: DismissDirection.endToStart,
-                background: Container(
-                  alignment: Alignment.centerRight,
-                  padding: const EdgeInsets.only(right: 16),
-                  child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
-                ),
-                onDismissed: (_) => _deleteReminder(r['id'] as int),
-                child: InkWell(
-                  onTap: () => _editReminder(r),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-                    child: Row(
-                      children: [
-                        const Text('💧', style: TextStyle(fontSize: 14)),
-                        const SizedBox(width: 8),
-                        Expanded(child: Text(r['label'] as String, style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
-                        Text(
-                          '${(r['hour'] as int).toString().padLeft(2, '0')}:${(r['minute'] as int).toString().padLeft(2, '0')}',
-                          style: const TextStyle(fontSize: 11, color: AppColors.water, fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(width: 4),
-                        const Icon(Icons.edit_outlined, size: 14, color: AppColors.onSurfaceVariant),
-                      ],
-                    ),
-                  ),
-                ),
+              subtitle: '${_waterReminders.length} reminder${_waterReminders.length == 1 ? '' : 's'} set',
+              expanded: _waterRemindersExpanded,
+              onToggle: () => setState(() => _waterRemindersExpanded = !_waterRemindersExpanded),
+              trailing: IconButton(
+                icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
+                onPressed: () => _addReminder('water'),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
+              body: _waterReminders.isEmpty
+                  ? const Text('No water reminders. Tap + to add.',
+                      style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant))
+                  : Column(
+                      children: _waterReminders.map((r) => _reminderRow(
+                        r: r, emoji: '💧', timeColor: AppColors.water,
+                      )).toList(),
+                    ),
             ),
-
             const SizedBox(height: 8),
 
-            // ── Meal Reminders ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('🍽️ Meal Reminders', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                          Text('${_mealReminders.length} reminders set', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                        ],
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
-                        onPressed: () => _addReminder('meal'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  if (_mealReminders.isEmpty)
-                    const Text('No meal reminders. Tap + to add.', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant))
-                  else
-                    ..._mealReminders.map((r) => Dismissible(
-                      key: ValueKey('mr_${r['id']}'),
-                      direction: DismissDirection.endToStart,
-                      background: Container(
-                        alignment: Alignment.centerRight,
-                        padding: const EdgeInsets.only(right: 16),
-                        child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
-                      ),
-                      onDismissed: (_) => _deleteReminder(r['id'] as int),
-                      child: InkWell(
-                        onTap: () => _editReminder(r),
-                        borderRadius: BorderRadius.circular(8),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
-                          child: Row(
-                            children: [
-                              const Text('🍽️', style: TextStyle(fontSize: 14)),
-                              const SizedBox(width: 8),
-                              Expanded(child: Text(r['label'] as String, style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
-                              Text(
-                                '${(r['hour'] as int).toString().padLeft(2, '0')}:${(r['minute'] as int).toString().padLeft(2, '0')}',
-                                style: const TextStyle(fontSize: 11, color: AppColors.secondary, fontWeight: FontWeight.w600),
-                              ),
-                              const SizedBox(width: 4),
-                              const Icon(Icons.edit_outlined, size: 14, color: AppColors.onSurfaceVariant),
-                            ],
-                          ),
-                        ),
-                      ),
-                    )),
-                ],
+            // ── 5. Meal Reminders ──
+            _collapsibleCard(
+              emoji: '🍽️',
+              title: 'Meal Reminders',
+              subtitle: '${_mealReminders.length} reminder${_mealReminders.length == 1 ? '' : 's'} set',
+              expanded: _mealRemindersExpanded,
+              onToggle: () => setState(() => _mealRemindersExpanded = !_mealRemindersExpanded),
+              trailing: IconButton(
+                icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
+                onPressed: () => _addReminder('meal'),
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
+              body: _mealReminders.isEmpty
+                  ? const Text('No meal reminders. Tap + to add.',
+                      style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant))
+                  : Column(
+                      children: _mealReminders.map((r) => _reminderRow(
+                        r: r, emoji: '🍽️', timeColor: AppColors.secondary,
+                      )).toList(),
+                    ),
             ),
-
             const SizedBox(height: 8),
 
             // ── Data Management ──
@@ -593,54 +636,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('💾 Data Management', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                  const Text('💾 Data Management',
+                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
                   const SizedBox(height: 4),
-                  const Text(
-                    'Export or restore your health data.',
-                    style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
-                  ),
+                  const Text('Export or restore your health data.',
+                      style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
                   const SizedBox(height: 12),
-
-                  // ── Export Buttons Row ──
-                  Row(
-                    children: [
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _isExporting ? null : _exportData,
-                          icon: _isExporting
-                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.surface))
-                              : const Icon(Icons.upload_rounded, size: 16),
-                          label: const Text('JSON Backup'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                            foregroundColor: AppColors.surface,
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
-                          ),
+                  Row(children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isExporting ? null : _exportData,
+                        icon: _isExporting
+                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.surface))
+                            : const Icon(Icons.upload_rounded, size: 16),
+                        label: const Text('JSON Backup'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primary, foregroundColor: AppColors.surface,
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: _isExporting ? null : _exportExcel,
-                          icon: const Icon(Icons.table_chart_rounded, size: 16),
-                          label: const Text('Excel Report'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF217346),
-                            foregroundColor: AppColors.surface,
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                            textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
-                          ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _isExporting ? null : _exportExcel,
+                        icon: const Icon(Icons.table_chart_rounded, size: 16),
+                        label: const Text('Excel Report'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF217346), foregroundColor: AppColors.surface,
+                          padding: const EdgeInsets.symmetric(vertical: 10),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
                         ),
                       ),
-                    ],
-                  ),
-
+                    ),
+                  ]),
                   const SizedBox(height: 8),
-
-                  // ── Import Button ──
                   SizedBox(
                     width: double.infinity,
                     child: OutlinedButton.icon(
@@ -658,26 +691,83 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ),
                   ),
-
                   const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      const Icon(Icons.warning_amber_rounded, size: 13, color: AppColors.error),
-                      const SizedBox(width: 4),
-                      const Expanded(
-                        child: Text(
-                          'Import will overwrite ALL existing data.',
-                          style: TextStyle(fontSize: 10, color: AppColors.error),
-                        ),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _isImporting ? null : _importFromExcel,
+                      icon: const Icon(Icons.table_view_rounded, size: 18),
+                      label: const Text('Recover from Excel'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF217346),
+                        side: const BorderSide(color: Color(0xFF217346)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                        textStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, fontFamily: 'DMSans'),
                       ),
-                    ],
+                    ),
                   ),
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    const Icon(Icons.warning_amber_rounded, size: 13, color: AppColors.error),
+                    const SizedBox(width: 4),
+                    const Expanded(
+                      child: Text('JSON import overwrites everything. Excel recovery appends only food/water/weight/fasting/sleep.',
+                          style: TextStyle(fontSize: 10, color: AppColors.error)),
+                    ),
+                  ]),
                 ],
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+
+  // ── Notification toggle row (Daily Summary / Sleep Reminder) ──
+  Widget _notifToggleRow({
+    required String emoji,
+    required String title,
+    required String subtitle,
+    required bool enabled,
+    required TimeOfDay? time,
+    required ValueChanged<TimeOfDay> onTimeChanged,
+    required ValueChanged<bool> onToggled,
+  }) {
+    return Row(
+      children: [
+        Text(emoji, style: const TextStyle(fontSize: 16)),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title,
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+              Text(subtitle,
+                  style: TextStyle(fontSize: 10,
+                      color: enabled ? AppColors.primary : AppColors.onSurfaceVariant)),
+            ],
+          ),
+        ),
+        if (enabled && time != null)
+          TextButton(
+            onPressed: () async {
+              final t = await showTimePicker(context: context, initialTime: time);
+              if (t != null) onTimeChanged(t);
+            },
+            style: TextButton.styleFrom(
+                padding: EdgeInsets.zero, minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+            child: Text(_fmtTime(time), style: const TextStyle(fontSize: 11, color: AppColors.primary)),
+          ),
+        Switch(
+          value: enabled,
+          activeThumbColor: AppColors.primary,
+          activeTrackColor: AppColors.primary.withValues(alpha: 0.4),
+          onChanged: onToggled,
+        ),
+      ],
     );
   }
 
@@ -688,12 +778,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final now = DateTime.now();
       final fileName =
           'health_backup_${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}.json';
-
-      // Write to a temp file then share it
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/$fileName');
       await file.writeAsString(jsonStr, flush: true);
-
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'application/json')],
         subject: 'Health Tracker Backup – $fileName',
@@ -710,7 +797,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   Future<void> _importData() async {
-    // Step 1: confirm they really want to overwrite
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -737,11 +823,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
     if (confirmed != true) return;
 
-    // Step 2: pick the file
     final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['json'],
-      allowMultiple: false,
+      type: FileType.custom, allowedExtensions: ['json'], allowMultiple: false,
     );
     if (result == null || result.files.single.path == null) return;
 
@@ -749,12 +832,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final file = File(result.files.single.path!);
       final jsonStr = await file.readAsString();
-      // Basic sanity check
-      jsonDecode(jsonStr); // throws if invalid JSON
-
+      jsonDecode(jsonStr);
       final summary = await DatabaseService.importAllData(jsonStr);
       await NotificationService.rescheduleAll(force: true);
-
       if (mounted) {
         await showDialog<void>(
           context: context,
@@ -786,71 +866,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Widget _buildCollapsibleSection({
-    required String emoji,
-    required String title,
-    required String subtitle,
-    required List<Map<String, dynamic>> items,
-    required bool expanded,
-    required int collapseAfter,
-    required VoidCallback onToggle,
-    required Widget Function(Map<String, dynamic>) itemBuilder,
-    VoidCallback? onAdd,
-  }) {
-    final showToggle = items.length > collapseAfter;
-    final visibleItems = expanded ? items : items.take(collapseAfter).toList();
+  Future<void> _importFromExcel() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom, allowedExtensions: ['xlsx'], allowMultiple: false,
+    );
+    if (result == null || result.files.single.path == null) return;
 
-    return AppCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('$emoji $title', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                  Text(subtitle, style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                ],
+    setState(() => _isImporting = true);
+    try {
+      final file = File(result.files.single.path!);
+      final summary = await DatabaseService.importFromExcel(file);
+      if (mounted) {
+        await showDialog<void>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.surfaceContainer,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            title: const Text('✅ Recovery Complete',
+                style: TextStyle(color: AppColors.onSurface, fontFamily: 'DMSans', fontSize: 16, fontWeight: FontWeight.w700)),
+            content: Text(summary, style: const TextStyle(color: AppColors.onSurfaceVariant, fontSize: 13, height: 1.6)),
+            actions: [
+              ElevatedButton(
+                onPressed: () => Navigator.pop(ctx),
+                style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
+                child: const Text('Done'),
               ),
-              if (onAdd != null)
-                IconButton(
-                  icon: const Icon(Icons.add_circle_outline, color: AppColors.primary, size: 20),
-                  onPressed: onAdd,
-                ),
             ],
           ),
-          const SizedBox(height: 4),
-          if (items.isEmpty)
-            Text('No $title set.', style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant))
-          else ...[
-            ...visibleItems.map(itemBuilder),
-            if (showToggle) ...[
-              if (!expanded)
-                ShaderMask(
-                  shaderCallback: (bounds) => const LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [Colors.white, Colors.transparent],
-                  ).createShader(bounds),
-                  blendMode: BlendMode.dstIn,
-                  child: const SizedBox(height: 8),
-                ),
-              Center(
-                child: TextButton(
-                  onPressed: onToggle,
-                  child: Text(
-                    expanded ? 'Show less' : 'Show all (${items.length})',
-                    style: const TextStyle(fontSize: 12, color: AppColors.primary),
-                  ),
-                ),
-              ),
-            ],
-          ],
-        ],
-      ),
-    );
+        );
+        await _loadData();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('❌ Excel recovery failed: $e'), backgroundColor: AppColors.error),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isImporting = false);
+    }
   }
 
   String _getMedEmoji(String type) {
@@ -875,8 +929,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         labelStyle: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
         suffixText: suffix,
         suffixStyle: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
-        filled: true,
-        fillColor: AppColors.surfaceContainerHigh,
+        filled: true, fillColor: AppColors.surfaceContainerHigh,
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
         isDense: true,
@@ -890,7 +943,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final db = await DatabaseService.database;
       final excel = xl.Excel.createExcel();
 
-      // ── Food Log sheet ──
       final foodSheet = excel['Food Log'];
       foodSheet.appendRow([
         xl.TextCellValue('Date'), xl.TextCellValue('Item'),
@@ -900,32 +952,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final foods = await db.query('food_logs', orderBy: 'date DESC, id DESC');
       for (final f in foods) {
         foodSheet.appendRow([
-          xl.TextCellValue(f['date'] as String),
-          xl.TextCellValue(f['item'] as String),
-          xl.IntCellValue(f['calories'] as int),
-          xl.IntCellValue(f['protein'] as int),
-          xl.IntCellValue(f['carbs'] as int),
-          xl.IntCellValue(f['fats'] as int),
+          xl.TextCellValue(f['date'] as String), xl.TextCellValue(f['item'] as String),
+          xl.IntCellValue(f['calories'] as int), xl.IntCellValue(f['protein'] as int),
+          xl.IntCellValue(f['carbs'] as int), xl.IntCellValue(f['fats'] as int),
         ]);
       }
 
-      // ── Water Log sheet ──
       final waterSheet = excel['Water Log'];
       waterSheet.appendRow([
         xl.TextCellValue('Date'), xl.TextCellValue('Amount (ml)'),
-        xl.TextCellValue('Type'), xl.TextCellValue('Logged At'),
+        xl.TextCellValue('Type'), xl.TextCellValue('Drink'), xl.TextCellValue('Logged At'),
       ]);
       final waters = await db.query('water_logs', orderBy: 'date DESC, id DESC');
       for (final w in waters) {
         waterSheet.appendRow([
-          xl.TextCellValue(w['date'] as String),
-          xl.IntCellValue(w['ml'] as int),
+          xl.TextCellValue(w['date'] as String), xl.IntCellValue(w['ml'] as int),
           xl.TextCellValue((w['type'] as String?) ?? 'water'),
+          xl.TextCellValue((w['drink_name'] as String?) ?? ''),
           xl.TextCellValue((w['created_at'] as String?) ?? ''),
         ]);
       }
 
-      // ── Weight Log sheet ──
       final weightSheet = excel['Weight Log'];
       weightSheet.appendRow([xl.TextCellValue('Date'), xl.TextCellValue('Weight (kg)')]);
       final weights = await db.query('weight_logs', orderBy: 'date DESC');
@@ -936,11 +983,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ]);
       }
 
-      // ── Fasting Log sheet ──
       final fastSheet = excel['Fasting Log'];
       fastSheet.appendRow([
-        xl.TextCellValue('Start'), xl.TextCellValue('End'),
-        xl.TextCellValue('Duration (min)'),
+        xl.TextCellValue('Start'), xl.TextCellValue('End'), xl.TextCellValue('Duration (min)'),
       ]);
       final fasts = await db.query('fasting_logs', orderBy: 'id DESC');
       for (final f in fasts) {
@@ -951,11 +996,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ]);
       }
 
-      // ── Sleep Log sheet ──
       final sleepSheet = excel['Sleep Log'];
       sleepSheet.appendRow([
-        xl.TextCellValue('Start'), xl.TextCellValue('End'),
-        xl.TextCellValue('Duration (min)'),
+        xl.TextCellValue('Start'), xl.TextCellValue('End'), xl.TextCellValue('Duration (min)'),
       ]);
       final sleeps = await db.query('sleep_logs', orderBy: 'id DESC');
       for (final s in sleeps) {
@@ -966,10 +1009,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ]);
       }
 
-      // Remove default Sheet1
-      if (excel.sheets.containsKey('Sheet1')) {
-        excel.delete('Sheet1');
-      }
+      if (excel.sheets.containsKey('Sheet1')) excel.delete('Sheet1');
 
       final bytes = excel.save();
       if (bytes == null) throw 'Failed to generate Excel';
@@ -980,7 +1020,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final dir = await getTemporaryDirectory();
       final file = File('${dir.path}/$fileName');
       await file.writeAsBytes(bytes, flush: true);
-
       await Share.shareXFiles(
         [XFile(file.path, mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')],
         subject: 'Health Tracker Report — $fileName',

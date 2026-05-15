@@ -17,6 +17,25 @@ class AppColors {
   static const water = Color(0xFF5BC8F5);
 }
 
+/// Shared spacing scale. Prefer these over magic numbers in new code.
+class AppSpacing {
+  static const double xs = 4;
+  static const double sm = 8;
+  static const double md = 12;
+  static const double lg = 16;
+  static const double xl = 20;
+  static const double xxl = 24;
+}
+
+/// Shared corner-radius scale.
+class AppRadii {
+  static const double sm = 8;
+  static const double md = 12;
+  static const double lg = 16;
+  static const double xl = 20;
+  static const double pill = 99;
+}
+
 class AppTheme {
   static ThemeData get darkTheme {
     return ThemeData(
@@ -67,6 +86,31 @@ class AppTheme {
         elevation: 0,
         scrolledUnderElevation: 0,
       ),
+      navigationBarTheme: NavigationBarThemeData(
+        backgroundColor: AppColors.surfaceContainer,
+        indicatorColor: AppColors.primary.withValues(alpha: 0.22),
+        surfaceTintColor: Colors.transparent,
+        labelTextStyle: WidgetStateProperty.resolveWith((states) {
+          final selected = states.contains(WidgetState.selected);
+          return TextStyle(
+            fontFamily: 'DMSans',
+            fontSize: 10,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            color: selected ? AppColors.primary : AppColors.onSurfaceVariant,
+          );
+        }),
+        iconTheme: WidgetStateProperty.resolveWith((states) {
+          final selected = states.contains(WidgetState.selected);
+          return IconThemeData(
+            color: selected ? AppColors.primary : AppColors.onSurfaceVariant,
+            size: 22,
+          );
+        }),
+      ),
+      pageTransitionsTheme: const PageTransitionsTheme(builders: {
+        TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+        TargetPlatform.windows: FadeUpwardsPageTransitionsBuilder(),
+      }),
     );
   }
 }

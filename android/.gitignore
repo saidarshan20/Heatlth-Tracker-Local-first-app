@@ -12,3 +12,7 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# Exception: the pinned debug keystore is committed so every clone signs
+# identically and `flutter run` is always an upgrade install. Release
+# keystores must never be committed.
+!app/debug.keystore
