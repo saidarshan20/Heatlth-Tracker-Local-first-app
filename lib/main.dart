@@ -12,6 +12,10 @@ import 'screens/log_screen.dart';
 import 'screens/health_screen.dart';
 import 'screens/reports_screen.dart';
 
+/// Global notifier — screens listen to this to replay entrance animations
+/// whenever their tab becomes active. Set by [_AppShellState._onTabTap].
+final activeTabNotifier = ValueNotifier<int>(0);
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: '.env');
@@ -38,11 +42,194 @@ class HealthTrackerApp extends StatelessWidget {
         title: 'Health Tracker',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.darkTheme,
-        home: const AppShell(),
+        scrollBehavior: _AppScrollBehavior(),
+        home: const SplashScreen(),
       ),
     );
   }
 }
+
+/// Gives every [ListView] / [ScrollView] iOS-style elastic overscroll
+/// without touching individual screens.
+class _AppScrollBehavior extends ScrollBehavior {
+  @override
+  ScrollPhysics getScrollPhysics(BuildContext context) =>
+      const BouncingScrollPhysics();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Splash Screen
+// ─────────────────────────────────────────────────────────────────────────────
+
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen>
+    with TickerProviderStateMixin {
+  // Fade-in of entire splash content
+  late final AnimationController _fadeInCtrl;
+  late final Animation<double> _fadeIn;
+
+  // Glow pulse on the emoji circle
+  late final AnimationController _glowCtrl;
+  late final Animation<double> _glow;
+
+  // Fade-out before transitioning to AppShell
+  late final AnimationController _fadeOutCtrl;
+  late final Animation<double> _fadeOut;
+
+  bool _showShell = false;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // 1. Fade-in: 0 → 1 over 600ms
+    _fadeInCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 600));
+    _fadeIn =
+        CurvedAnimation(parent: _fadeInCtrl, curve: Curves.easeOut);
+
+    // 2. Glow pulse: repeats indefinitely, 400ms per half-cycle
+    _glowCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 800));
+    _glow = CurvedAnimation(parent: _glowCtrl, curve: Curves.easeInOut);
+
+    // 3. Fade-out: 1 → 0 over 300ms just before switching
+    _fadeOutCtrl = AnimationController(
+        vsync: this, duration: const Duration(milliseconds: 300));
+    _fadeOut =
+        CurvedAnimation(parent: _fadeOutCtrl, curve: Curves.easeIn);
+
+    _runSequence();
+  }
+
+  Future<void> _runSequence() async {
+    // Fade in the splash
+    await _fadeInCtrl.forward();
+
+    // Start glow pulse loop
+    _glowCtrl.repeat(reverse: true);
+
+    // Hold for ~1 second
+    await Future.delayed(const Duration(milliseconds: 1000));
+
+    // Fade out
+    _glowCtrl.stop();
+    await _fadeOutCtrl.forward();
+
+    // Switch to shell
+    if (mounted) setState(() => _showShell = true);
+  }
+
+  @override
+  void dispose() {
+    _fadeInCtrl.dispose();
+    _glowCtrl.dispose();
+    _fadeOutCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_showShell) return const AppShell();
+
+    return AnimatedBuilder(
+      animation: Listenable.merge([_fadeIn, _glow, _fadeOut]),
+      builder: (context, _) {
+        final opacity = _fadeIn.value * (1.0 - _fadeOut.value);
+        // Glow blur: pulses between 8 and 28
+        final glowBlur = 8.0 + (_glow.value * 20.0);
+        // Glow spread: pulses between 0 and 6
+        final glowSpread = _glow.value * 6.0;
+
+        return Scaffold(
+          backgroundColor: AppColors.surface,
+          body: Opacity(
+            opacity: opacity,
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // ── Emoji logo with glow ring ──
+                  Container(
+                    width: 96,
+                    height: 96,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.primaryContainer,
+                      boxShadow: [
+                        BoxShadow(
+                          color: AppColors.primary.withValues(alpha: 0.55),
+                          blurRadius: glowBlur,
+                          spreadRadius: glowSpread,
+                        ),
+                      ],
+                    ),
+                    alignment: Alignment.center,
+                    child: const Text('🏃', style: TextStyle(fontSize: 46)),
+                  ),
+                  const SizedBox(height: 24),
+
+                  // ── App name ──
+                  const Text(
+                    'Health Tracker',
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.w700,
+                      fontFamily: 'DMSerifDisplay',
+                      color: AppColors.onSurface,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+
+                  // ── Tagline ──
+                  Text(
+                    'Your daily wellness companion',
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: AppColors.onSurfaceVariant.withValues(alpha: 0.85),
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 48),
+
+                  // ── Subtle loading dots ──
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: List.generate(3, (i) {
+                      final dotOpacity =
+                          ((_glow.value + i / 3) % 1.0).clamp(0.2, 1.0);
+                      return Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        width: 5,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: AppColors.primary
+                              .withValues(alpha: dotOpacity),
+                        ),
+                      );
+                    }),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// App Shell
+// ─────────────────────────────────────────────────────────────────────────────
 
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
@@ -66,23 +253,62 @@ const _tabs = <_TabConfig>[
   _TabConfig(icon: Icons.bar_chart_rounded, label: 'Reports', screen: ReportsScreen()),
 ];
 
-class _AppShellState extends State<AppShell> {
+class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
   int _currentIndex = 0;
   final PageController _pageCtrl = PageController();
+
+  // One bounce controller per tab icon
+  late final List<AnimationController> _bounceCtrl;
+  late final List<Animation<double>> _bounceAnim;
+
+  @override
+  void initState() {
+    super.initState();
+    _bounceCtrl = List.generate(
+      _tabs.length,
+      (_) => AnimationController(
+        vsync: this,
+        duration: const Duration(milliseconds: 220),
+      ),
+    );
+    _bounceAnim = _bounceCtrl.map((ctrl) {
+      return TweenSequence<double>([
+        TweenSequenceItem(
+            tween: Tween(begin: 1.0, end: 1.28)
+                .chain(CurveTween(curve: Curves.easeOut)),
+            weight: 40),
+        TweenSequenceItem(
+            tween: Tween(begin: 1.28, end: 1.0)
+                .chain(CurveTween(curve: Curves.elasticOut)),
+            weight: 60),
+      ]).animate(ctrl);
+    }).toList();
+  }
 
   @override
   void dispose() {
     _pageCtrl.dispose();
+    for (final c in _bounceCtrl) {
+      c.dispose();
+    }
     super.dispose();
   }
 
   void _onTabTap(int i) {
     if (_currentIndex == i) return;
+
+    // Bounce the icon
+    _bounceCtrl[i].forward(from: 0);
+
+    // Animate the page
     _pageCtrl.animateToPage(
       i,
       duration: const Duration(milliseconds: 280),
       curve: Curves.easeOutCubic,
     );
+
+    // Notify screens to replay their entrance animations
+    activeTabNotifier.value = i;
   }
 
   void _showQuickLogSheet() {
@@ -188,7 +414,10 @@ class _AppShellState extends State<AppShell> {
         child: PageView.builder(
           controller: _pageCtrl,
           itemCount: _tabs.length,
-          onPageChanged: (i) => setState(() => _currentIndex = i),
+          onPageChanged: (i) {
+            setState(() => _currentIndex = i);
+            activeTabNotifier.value = i;
+          },
           physics: const ClampingScrollPhysics(),
           itemBuilder: (_, i) => _tabs[i].screen,
         ),
@@ -208,8 +437,14 @@ class _AppShellState extends State<AppShell> {
         height: 64,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         destinations: [
-          for (final t in _tabs)
-            NavigationDestination(icon: Icon(t.icon), label: t.label),
+          for (int i = 0; i < _tabs.length; i++)
+            NavigationDestination(
+              icon: ScaleTransition(
+                scale: _bounceAnim[i],
+                child: Icon(_tabs[i].icon),
+              ),
+              label: _tabs[i].label,
+            ),
         ],
       ),
     );

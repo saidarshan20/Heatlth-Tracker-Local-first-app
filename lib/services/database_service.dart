@@ -787,6 +787,85 @@ class DatabaseService {
     };
   }
 
+  static Future<String> getAIReportPayload(String range) async {
+    final now = DateTime.now();
+    int daysToFetch = 7;
+    int offsetDays = 0; // 0 = start from today, 1 = start from yesterday
+
+    if (range == 'Yesterday') {
+      daysToFetch = 1;
+      offsetDays = 1;
+    } else if (range == 'Today') {
+      daysToFetch = 1;
+      offsetDays = 0;
+    } else if (range == 'Weekly') {
+      daysToFetch = 7;
+      offsetDays = 0;
+      
+      // Weekly unfinished logic: check if ANY active 'meal' reminder is still upcoming today
+      final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+      final mealReminders = await getReminders(type: 'meal');
+      bool hasUpcomingMeal = false;
+      for (final r in mealReminders) {
+        if (r['active'] == 1) {
+          final isSuppressed = await isNotifSuppressedToday(r['id'] as int);
+          if (!isSuppressed) {
+            final medTime = DateTime(now.year, now.month, now.day, r['hour'] as int, r['minute'] as int);
+            if (medTime.isAfter(now)) {
+              hasUpcomingMeal = true;
+              break;
+            }
+          }
+        }
+      }
+      if (hasUpcomingMeal) {
+        offsetDays = 1; // Exclude today, start from yesterday
+      }
+    }
+
+    final List<Map<String, dynamic>> daysData = [];
+
+    for (int i = offsetDays; i < offsetDays + daysToFetch; i++) {
+      final d = now.subtract(Duration(days: i));
+      final dateStr = '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+      final ft = await getFoodTotals(dateStr);
+      final foodLogs = await getFoodForDate(dateStr);
+      final foodNames = foodLogs.map((e) => e['item']).join(', ');
+
+      final waterTotal = await getWaterTotal(dateStr);
+      final softDrinkTotal = await getSoftDrinkWater(dateStr);
+
+      final medsTakenList = await getTakenMedicineIds(dateStr);
+      final medsTotal = (await getMedicines()).length;
+      final medsTaken = medsTakenList.length;
+
+      daysData.add({
+        'Date': dateStr,
+        'Cals': ft['cal'],
+        'P/C/F': '${ft['p']}/${ft['c']}/${ft['f']}',
+        'Water': waterTotal,
+        if (softDrinkTotal > 0) 'SoftDrinks': softDrinkTotal,
+        if (foodNames.isNotEmpty) 'Foods': foodNames,
+        'Meds': '$medsTaken/$medsTotal',
+      });
+    }
+
+    final streak = await getMedicineStreak();
+    final calGoal = await getSettingInt('cal_goal', 2000);
+    final protGoal = await getSettingInt('prot_goal', 120);
+    final waterGoal = await getSettingInt('water_goal', 3000);
+
+    final payload = {
+      'Range': range,
+      'Goals': 'Cal:$calGoal, P:$protGoal, W:$waterGoal',
+      'MedStreak': streak,
+      'Days': daysData,
+    };
+
+    return jsonEncode(payload);
+  }
+
   // ── Notification Suppression ──
 
   /// Persists that [notifId] has been suppressed today so [rescheduleAll] can

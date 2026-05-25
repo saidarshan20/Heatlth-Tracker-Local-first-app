@@ -9,6 +9,7 @@ import '../services/gemini_service.dart';
 import '../services/image_food_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
+import '../main.dart' show activeTabNotifier;
 
 class LogScreen extends StatefulWidget {
   const LogScreen({super.key});
@@ -17,8 +18,12 @@ class LogScreen extends StatefulWidget {
   State<LogScreen> createState() => _LogScreenState();
 }
 
-class _LogScreenState extends State<LogScreen> with SingleTickerProviderStateMixin {
+class _LogScreenState extends State<LogScreen> with TickerProviderStateMixin {
   late TabController _tabCtrl;
+  // Entrance animation — replays every time Log tab becomes active
+  late final AnimationController _enterCtrl;
+  late final Animation<double> _enterAnim;
+
   final _aiCtrl = TextEditingController();
   final _nameCtrl = TextEditingController();
   final _calCtrl = TextEditingController();
@@ -34,10 +39,23 @@ class _LogScreenState extends State<LogScreen> with SingleTickerProviderStateMix
   void initState() {
     super.initState();
     _tabCtrl = TabController(length: 3, vsync: this);
+    _enterCtrl = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 350));
+    _enterAnim = CurvedAnimation(parent: _enterCtrl, curve: Curves.easeOutCubic);
+    _enterCtrl.forward();
+    activeTabNotifier.addListener(_onTabChanged);
+  }
+
+  void _onTabChanged() {
+    if (activeTabNotifier.value == 1 && mounted) {
+      _enterCtrl.forward(from: 0);
+    }
   }
 
   @override
   void dispose() {
+    activeTabNotifier.removeListener(_onTabChanged);
+    _enterCtrl.dispose();
     _tabCtrl.dispose();
     _aiCtrl.dispose();
     _nameCtrl.dispose();
@@ -151,43 +169,52 @@ class _LogScreenState extends State<LogScreen> with SingleTickerProviderStateMix
   Widget build(BuildContext context) {
     return Consumer<DashboardProvider>(
       builder: (context, dash, _) {
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('Log Food', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
-                  const Text('Tell us what you ate — or snap a photo', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
-                  const SizedBox(height: 16),
-                  TabBar(
-                    controller: _tabCtrl,
-                    indicatorColor: AppColors.primary,
-                    labelColor: AppColors.primary,
-                    unselectedLabelColor: AppColors.onSurfaceVariant,
-                    labelStyle: const TextStyle(fontFamily: 'DMSans', fontSize: 12, fontWeight: FontWeight.w600),
-                    tabs: const [
-                      Tab(text: '✨ AI Log'),
-                      Tab(text: 'Manual'),
-                      Tab(text: 'History'),
+        return FadeTransition(
+          opacity: _enterAnim,
+          child: SlideTransition(
+            position: Tween<Offset>(
+              begin: const Offset(0, 0.03),
+              end: Offset.zero,
+            ).animate(_enterAnim),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Log Food', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                      const Text('Tell us what you ate — or snap a photo', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                      const SizedBox(height: 16),
+                      TabBar(
+                        controller: _tabCtrl,
+                        indicatorColor: AppColors.primary,
+                        labelColor: AppColors.primary,
+                        unselectedLabelColor: AppColors.onSurfaceVariant,
+                        labelStyle: const TextStyle(fontFamily: 'DMSans', fontSize: 12, fontWeight: FontWeight.w600),
+                        tabs: const [
+                          Tab(text: '✨ AI Log'),
+                          Tab(text: 'Manual'),
+                          Tab(text: 'History'),
+                        ],
+                      ),
                     ],
                   ),
-                ],
-              ),
+                ),
+                Expanded(
+                  child: TabBarView(
+                    controller: _tabCtrl,
+                    children: [
+                      _buildAITab(dash),
+                      _buildManualTab(),
+                      _buildHistoryTab(dash),
+                    ],
+                  ),
+                ),
+              ],
             ),
-            Expanded(
-              child: TabBarView(
-                controller: _tabCtrl,
-                children: [
-                  _buildAITab(dash),
-                  _buildManualTab(),
-                  _buildHistoryTab(dash),
-                ],
-              ),
-            ),
-          ],
+          ),
         );
       },
     );

@@ -317,3 +317,98 @@ class AppCard extends StatelessWidget {
     );
   }
 }
+
+/// One-shot fade + upward drift animation that fires on [initState].
+///
+/// Optionally delayed by [delay] — useful for staggering multiple items.
+/// The widget fades from 0→1 opacity and slides from [Offset(0, 0.04)] →
+/// [Offset.zero] over [duration] with [Curves.easeOutCubic].
+class EntranceFade extends StatefulWidget {
+  final Widget child;
+  final Duration delay;
+  final Duration duration;
+
+  const EntranceFade({
+    super.key,
+    required this.child,
+    this.delay = Duration.zero,
+    this.duration = const Duration(milliseconds: 320),
+  });
+
+  @override
+  State<EntranceFade> createState() => _EntranceFadeState();
+}
+
+class _EntranceFadeState extends State<EntranceFade>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _anim;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: widget.duration);
+    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeOutCubic);
+
+    if (widget.delay == Duration.zero) {
+      _ctrl.forward();
+    } else {
+      Future.delayed(widget.delay, () {
+        if (mounted) _ctrl.forward();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _anim,
+      child: SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(0, 0.04),
+          end: Offset.zero,
+        ).animate(_anim),
+        child: widget.child,
+      ),
+    );
+  }
+}
+
+/// Wraps [child] in [EntranceFade] with a delay of [index] × [staggerMs].
+///
+/// Use this to cascade-animate a list of items:
+/// ```dart
+/// StaggerItem(index: 0, child: headerWidget),
+/// StaggerItem(index: 1, child: cardOne),
+/// StaggerItem(index: 2, child: cardTwo),
+/// ```
+class StaggerItem extends StatelessWidget {
+  final int index;
+  final Widget child;
+  final int staggerMs;
+  final Duration duration;
+
+  const StaggerItem({
+    super.key,
+    required this.index,
+    required this.child,
+    this.staggerMs = 80,
+    this.duration = const Duration(milliseconds: 320),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return EntranceFade(
+      delay: Duration(milliseconds: index * staggerMs),
+      duration: duration,
+      child: child,
+    );
+  }
+}
+

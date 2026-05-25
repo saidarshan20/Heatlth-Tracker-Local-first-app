@@ -5,6 +5,7 @@ import '../services/database_service.dart';
 import '../services/gemini_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
+import '../main.dart' show activeTabNotifier;
 
 class ReportsScreen extends StatefulWidget {
   const ReportsScreen({super.key});
@@ -13,7 +14,8 @@ class ReportsScreen extends StatefulWidget {
   State<ReportsScreen> createState() => _ReportsScreenState();
 }
 
-class _ReportsScreenState extends State<ReportsScreen> {
+class _ReportsScreenState extends State<ReportsScreen>
+    with SingleTickerProviderStateMixin {
   Map<String, dynamic>? _stats;
   int _medStreak = 0;
   int _medBestStreak = 0;
@@ -27,14 +29,31 @@ class _ReportsScreenState extends State<ReportsScreen> {
   double? _heightCm;
   double? _latestWeight;
 
+  // Entrance animation
+  late final AnimationController _enterCtrl;
+  int _animationEpoch = 0;
+
   @override
   void initState() {
     super.initState();
+    _enterCtrl = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 350));
+    _enterCtrl.forward();
+    activeTabNotifier.addListener(_onTabChanged);
     _load();
+  }
+
+  void _onTabChanged() {
+    if (activeTabNotifier.value == 3 && mounted) {
+      setState(() => _animationEpoch++);
+      _enterCtrl.forward(from: 0);
+    }
   }
 
   @override
   void dispose() {
+    activeTabNotifier.removeListener(_onTabChanged);
+    _enterCtrl.dispose();
     _planCtrl.dispose();
     super.dispose();
   }
@@ -66,9 +85,12 @@ class _ReportsScreenState extends State<ReportsScreen> {
     });
   }
 
+  String _insightRange = 'Weekly';
+
   Future<void> _getAIInsights() async {
-    if (_stats == null) return;
-    final insights = await GeminiService.getWeeklyInsights(_stats!);
+    setState(() { _aiInsights = 'Loading...'; });
+    final payload = await DatabaseService.getAIReportPayload(_insightRange);
+    final insights = await GeminiService.getWeeklyInsights(payload);
     if (mounted) setState(() { _aiInsights = insights; });
   }
 
@@ -99,15 +121,27 @@ class _ReportsScreenState extends State<ReportsScreen> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
       children: [
-        const Text('Weekly Report', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
-        Text(
-          '${_formatDate(now.subtract(const Duration(days: 6)))} – ${_formatDate(now)}',
-          style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant),
+        StaggerItem(
+          key: ValueKey('reports_header_$_animationEpoch'),
+          index: 0,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Weekly Report', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+              Text(
+                '${_formatDate(now.subtract(const Duration(days: 6)))} – ${_formatDate(now)}',
+                style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant),
+              ),
+              const SizedBox(height: 16),
+            ],
+          ),
         ),
-        const SizedBox(height: 16),
 
         // ── Calorie chart ──
-        if (_stats != null) AppCard(
+        if (_stats != null) StaggerItem(
+          key: ValueKey('reports_chart_$_animationEpoch'),
+          index: 1,
+          child: AppCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -142,32 +176,60 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 child: Builder(builder: (_) {
                   final goal = DashboardProvider.calGoal.toDouble();
                   final dailyCals = (_stats!['dailyCals'] as List<int>);
-                  final maxVal = dailyCals.fold<int>(0, (a, b) => b > a ? b : a).toDouble();
-                  // Pin maxY so the goal dashed line is always visible AND a
-                  // small bar (e.g. 300 kcal) doesn't stretch to the top.
-                  // Headroom of 1.15x over the larger of (goal, today's max).
-                  final maxY = (maxVal > goal ? maxVal : goal) * 1.15;
+                  final maxY = goal * 1.35;
+                  
                   return BarChart(
                     BarChartData(
                       maxY: maxY,
                       minY: 0,
+                      barTouchData: BarTouchData(
+                        enabled: false,
+                        touchTooltipData: BarTouchTooltipData(
+                          tooltipPadding: EdgeInsets.zero,
+                          tooltipMargin: -50,
+                          getTooltipColor: (_) => Colors.transparent,
+                          direction: TooltipDirection.top,
+                          getTooltipItem: (group, groupIndex, rod, rodIndex) {
+                            final cals = dailyCals[groupIndex];
+                            if (cals > maxY) {
+                              final text = cals.toString().split('').join('\n');
+                              return BarTooltipItem(
+                                text,
+                                const TextStyle(
+                                  color: AppColors.error,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  height: 1.0,
+                                  shadows: [
+                                    Shadow(color: Colors.black, blurRadius: 2),
+                                    Shadow(color: Colors.black, blurRadius: 1),
+                                  ],
+                                ),
+                              );
+                            }
+                            return null;
+                          },
+                        ),
+                      ),
                       barGroups: List.generate(7, (i) {
-                        final val = dailyCals[i].toDouble();
+                        double val = dailyCals[i].toDouble();
                         final isToday = i == 6;
                         final overGoal = val > goal;
+                        final isCapped = val > maxY;
+                        if (isCapped) val = maxY;
+                        
                         final color = overGoal
                             ? AppColors.error
                             : (isToday ? AppColors.primary : AppColors.surfaceContainerHigh);
                         return BarChartGroupData(
                           x: i,
+                          showingTooltipIndicators: isCapped ? [0] : [],
                           barRods: [
                             BarChartRodData(
                               toY: val,
                               width: 20,
                               borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
                               color: color,
-                              // Faint background rod hints at the full chart range,
-                              // so a 300 kcal bar reads as "small", not "max".
                               backDrawRodData: BackgroundBarChartRodData(
                                 show: true,
                                 toY: maxY,
@@ -197,7 +259,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                       ),
                       borderData: FlBorderData(show: false),
                       gridData: const FlGridData(show: false),
-                      barTouchData: BarTouchData(enabled: false),
+
                       extraLinesData: ExtraLinesData(
                         horizontalLines: [
                           HorizontalLine(
@@ -229,10 +291,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
               ),
             ],
           ),
+          ),
         ),
 
         // ── Stat cards ──
-        if (_stats != null) Row(
+        if (_stats != null) StaggerItem(
+          key: ValueKey('reports_stats_$_animationEpoch'),
+          index: 2,
+          child: Row(
           children: [
             Expanded(child: AppCard(child: _statCard('Avg Protein', '${_stats!['avgProt']}g', 'goal: 120g', AppColors.primary))),
             const SizedBox(width: 8),
@@ -247,74 +313,88 @@ class _ReportsScreenState extends State<ReportsScreen> {
               AppColors.warning,
             ))),
           ],
+          ),
         ),
 
         // ── BMI Card ──
-        if (_bmi != null) AppCard(
-          child: Row(
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text('📐 Body Mass Index', style: TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
-                  const SizedBox(height: 4),
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Text(
-                        _bmi!.toStringAsFixed(1),
-                        style: TextStyle(
-                          fontSize: 28, fontWeight: FontWeight.w800,
-                          color: _bmiColor(_bmi!),
+        StaggerItem(
+          key: ValueKey('reports_bmi_$_animationEpoch'),
+          index: 3,
+          child: Builder(builder: (_) {
+            if (_bmi != null) {
+              return AppCard(
+                child: Row(
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('📐 Body Mass Index', style: TextStyle(fontSize: 10, color: AppColors.onSurfaceVariant)),
+                        const SizedBox(height: 4),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              _bmi!.toStringAsFixed(1),
+                              style: TextStyle(
+                                fontSize: 28, fontWeight: FontWeight.w800,
+                                color: _bmiColor(_bmi!),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 4),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: _bmiColor(_bmi!).withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(99),
+                                ),
+                                child: Text(
+                                  _bmiLabel(_bmi!),
+                                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _bmiColor(_bmi!)),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 4),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: _bmiColor(_bmi!).withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(99),
-                          ),
-                          child: Text(
-                            _bmiLabel(_bmi!),
-                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _bmiColor(_bmi!)),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-              const Spacer(),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text('${_latestWeight?.toStringAsFixed(1) ?? '?'} kg', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
-                  Text('${_heightCm?.toStringAsFixed(0) ?? '?'} cm', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                ],
-              ),
-            ],
-          ),
-        )
-        else if (_heightCm == null) AppCard(
-          child: Row(
-            children: [
-              const Text('📐', style: TextStyle(fontSize: 20)),
-              const SizedBox(width: 10),
-              const Expanded(
-                child: Text(
-                  'Set your height in Settings → Goals to see BMI',
-                  style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                      ],
+                    ),
+                    const Spacer(),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text('${_latestWeight?.toStringAsFixed(1) ?? '?'} kg', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: AppColors.onSurface)),
+                        Text('${_heightCm?.toStringAsFixed(0) ?? '?'} cm', style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                      ],
+                    ),
+                  ],
                 ),
-              ),
-            ],
-          ),
+              );
+            } else if (_heightCm == null) {
+              return AppCard(
+                child: Row(
+                  children: [
+                    const Text('📐', style: TextStyle(fontSize: 20)),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Text(
+                        'Set your height in Settings → Goals to see BMI',
+                        style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+            return const SizedBox.shrink();
+          }),
         ),
 
         // ── AI Insights ──
-        AppCard(
+        StaggerItem(
+          key: ValueKey('reports_ai_$_animationEpoch'),
+          index: 4,
+          child: AppCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -322,9 +402,36 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text('📝 AI Insights', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
-                  TextButton(
-                    onPressed: _getAIInsights,
-                    child: const Text('Generate', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                  Row(
+                    children: [
+                      DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _insightRange,
+                          icon: const Icon(Icons.arrow_drop_down, size: 16, color: AppColors.primary),
+                          style: const TextStyle(fontSize: 11, color: AppColors.primary, fontWeight: FontWeight.w600),
+                          isDense: true,
+                          items: ['Weekly', 'Yesterday', 'Today'].map((String value) {
+                            return DropdownMenuItem<String>(
+                              value: value,
+                              child: Text(value),
+                            );
+                          }).toList(),
+                          onChanged: (v) {
+                            if (v != null) setState(() { _insightRange = v; });
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: _getAIInsights,
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        child: const Text('Generate', style: TextStyle(fontSize: 11, color: AppColors.primary)),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -332,10 +439,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 Text(_aiInsights!.replaceAll('**', ''), style: const TextStyle(fontSize: 13, color: AppColors.onSurface, height: 1.5)),
             ],
           ),
+          ),
         ),
 
         // ── Meal Planner ──
-        AppCard(
+        StaggerItem(
+          key: ValueKey('reports_meal_$_animationEpoch'),
+          index: 5,
+          child: AppCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -369,6 +480,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                 Text(_mealPlan!.replaceAll('**', ''), style: const TextStyle(fontSize: 13, color: AppColors.onSurface, height: 1.5)),
               ],
             ],
+          ),
           ),
         ),
       ],

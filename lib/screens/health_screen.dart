@@ -7,6 +7,7 @@ import '../services/database_service.dart';
 import '../services/notification_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/common_widgets.dart';
+import '../main.dart' show activeTabNotifier;
 
 class HealthScreen extends StatefulWidget {
   const HealthScreen({super.key});
@@ -15,7 +16,8 @@ class HealthScreen extends StatefulWidget {
   State<HealthScreen> createState() => _HealthScreenState();
 }
 
-class _HealthScreenState extends State<HealthScreen> {
+class _HealthScreenState extends State<HealthScreen>
+    with SingleTickerProviderStateMixin {
   Map<String, dynamic>? _activeFast;
   List<Map<String, dynamic>> _weights = [];
   Timer? _fastTimer;
@@ -27,14 +29,31 @@ class _HealthScreenState extends State<HealthScreen> {
   Duration _sleepElapsed = Duration.zero;
   bool _medsExpanded = false;
 
+  // Entrance animation
+  late final AnimationController _enterCtrl;
+  int _animationEpoch = 0;
+
   @override
   void initState() {
     super.initState();
+    _enterCtrl = AnimationController(
+      vsync: this, duration: const Duration(milliseconds: 350));
+    _enterCtrl.forward();
+    activeTabNotifier.addListener(_onTabChanged);
     _loadData();
+  }
+
+  void _onTabChanged() {
+    if (activeTabNotifier.value == 2 && mounted) {
+      setState(() => _animationEpoch++);
+      _enterCtrl.forward(from: 0);
+    }
   }
 
   @override
   void dispose() {
+    activeTabNotifier.removeListener(_onTabChanged);
+    _enterCtrl.dispose();
     _fastTimer?.cancel();
     _sleepTimer?.cancel();
     super.dispose();
@@ -421,14 +440,26 @@ class _HealthScreenState extends State<HealthScreen> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 100),
           children: [
-            const Text('Health', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
-            const Text('Medicines · Fasting · Sleep · Weight', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
-            const SizedBox(height: 16),
+            StaggerItem(
+              key: ValueKey('health_header_$_animationEpoch'),
+              index: 0,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Health', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700, fontFamily: 'DMSerifDisplay', color: AppColors.onSurface)),
+                  const Text('Medicines · Fasting · Sleep · Weight', style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                  const SizedBox(height: 16),
+                ],
+              ),
+            ),
 
             // ── Medicines (Compact) ──
-            AppCard(
-              child: Column(
-                children: [
+            StaggerItem(
+              key: ValueKey('health_meds_$_animationEpoch'),
+              index: 1,
+              child: AppCard(
+                child: Column(
+                  children: [
                   InkWell(
                     onTap: () => setState(() => _medsExpanded = !_medsExpanded),
                     borderRadius: BorderRadius.circular(8),
@@ -511,12 +542,16 @@ class _HealthScreenState extends State<HealthScreen> {
                 ],
               ),
             ),
+            ),
 
             // ── Fasting ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            StaggerItem(
+              key: ValueKey('health_fasting_$_animationEpoch'),
+              index: 2,
+              child: AppCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -593,12 +628,16 @@ class _HealthScreenState extends State<HealthScreen> {
                   ],
                 ],
               ),
+              ),
             ),
             // ── Sleep Tracker (below Fasting) ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            StaggerItem(
+              key: ValueKey('health_sleep_$_animationEpoch'),
+              index: 3,
+              child: AppCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -682,13 +721,17 @@ class _HealthScreenState extends State<HealthScreen> {
                   ],
                 ],
               ),
+              ),
             ),
 
             // ── Weight ──
-            AppCard(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            StaggerItem(
+              key: ValueKey('health_weight_$_animationEpoch'),
+              index: 4,
+              child: AppCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -756,6 +799,7 @@ class _HealthScreenState extends State<HealthScreen> {
                   ],
                 ],
               ),
+            ),
             ),
 
           ],
