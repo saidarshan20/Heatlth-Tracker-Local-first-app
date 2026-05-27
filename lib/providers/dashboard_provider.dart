@@ -80,7 +80,7 @@ class DashboardProvider extends ChangeNotifier {
 
   Future<void> addWater(int ml) async {
     await DatabaseService.addWater(today, ml);
-    await NotificationService.suppressUpcomingWaterReminder();
+    await NotificationService.evaluateWaterPace();
     await refresh();
   }
 
@@ -155,7 +155,7 @@ class DashboardProvider extends ChangeNotifier {
     if (kcal > 0 || carbs > 0 || protein > 0 || fat > 0) {
       await DatabaseService.addFood(today, '$name ${ml}ml', kcal, protein, carbs, fat);
     }
-    await NotificationService.suppressUpcomingWaterReminder();
+    await NotificationService.evaluateWaterPace();
     await refresh();
   }
 
@@ -183,7 +183,7 @@ class DashboardProvider extends ChangeNotifier {
 
   Future<void> addFood(String item, int cal, int p, int c, int f, {String? rawInput}) async {
     await DatabaseService.addFood(today, item, cal, p, c, f);
-    await NotificationService.suppressMealReminderIfKeyword(item, rawInput: rawInput);
+    await NotificationService.suppressMealReminderIfRelevant(item, rawInput: rawInput);
     await refresh();
   }
 
@@ -202,6 +202,7 @@ class DashboardProvider extends ChangeNotifier {
     await DatabaseService.takeMedicine(today, medId, now);
     // Auto-log 250ml water
     await DatabaseService.addWater(today, 250);
+    await NotificationService.evaluateWaterPace();
 
     // Cancel today's upcoming alarm so it doesn't fire after already taken
     final notifId = 1000 + medId;

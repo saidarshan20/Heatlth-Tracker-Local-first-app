@@ -11,6 +11,8 @@ import 'screens/home_screen.dart';
 import 'screens/log_screen.dart';
 import 'screens/health_screen.dart';
 import 'screens/reports_screen.dart';
+import 'package:image_picker/image_picker.dart';
+import 'services/image_food_service.dart';
 
 /// Global notifier — screens listen to this to replay entrance animations
 /// whenever their tab becomes active. Set by [_AppShellState._onTabTap].
@@ -311,6 +313,138 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
     activeTabNotifier.value = i;
   }
 
+  void _showFABOptions() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.only(bottom: 24, left: 16, right: 16),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            FloatingActionButton(
+              heroTag: 'fab_text',
+              onPressed: () {
+                Navigator.pop(ctx);
+                _showQuickLogSheet();
+              },
+              backgroundColor: AppColors.surfaceContainerHigh,
+              foregroundColor: AppColors.primary,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: const Icon(Icons.edit_note_rounded),
+            ),
+            const SizedBox(width: 16),
+            FloatingActionButton(
+              heroTag: 'fab_cam',
+              onPressed: () {
+                Navigator.pop(ctx);
+                _quickCamAction();
+              },
+              backgroundColor: AppColors.primary,
+              foregroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              child: const Icon(Icons.photo_camera_rounded),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _quickCamAction() async {
+    final XFile? file = await ImageFoodService.captureFromCamera();
+    if (file == null) return;
+
+    if (!mounted) return;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppColors.surfaceContainer,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        bool loading = true;
+        Map<String, dynamic>? estimate;
+        String? errorMsg;
+
+        // Fire parsing once
+        WidgetsBinding.instance.addPostFrameCallback((_) async {
+          final compressed = await ImageFoodService.compress(file);
+          final result = await ImageFoodService.parseFoodFromImage(compressed, hint: null);
+          if (ctx.mounted) {
+            (ctx as Element).markNeedsBuild();
+            loading = false;
+            if (result != null) {
+              estimate = result;
+            } else {
+              final reason = ImageFoodService.lastError ?? 'unknown';
+              errorMsg = "❌ Image parse failed: $reason";
+            }
+          }
+        });
+
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) => Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, MediaQuery.of(ctx).viewInsets.bottom + 16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Camera AI Log', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700, color: AppColors.onSurface, fontFamily: 'DMSerifDisplay')),
+                const SizedBox(height: 12),
+                if (loading)
+                  const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24.0),
+                      child: CircularProgressIndicator(color: AppColors.primary),
+                    ),
+                  )
+                else if (errorMsg != null)
+                  Text(errorMsg!, style: const TextStyle(color: AppColors.error))
+                else if (estimate != null) ...[
+                  Text('${estimate!['item']} — ~${estimate!['calories']} kcal', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: AppColors.primary)),
+                  Text('P:${estimate!['protein']}g · C:${estimate!['carbs']}g · F:${estimate!['fats']}g', style: const TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: () async {
+                            final dash = context.read<DashboardProvider>();
+                            await dash.addFood(
+                              estimate!['item'] as String,
+                              (estimate!['calories'] as num).toInt(),
+                              (estimate!['protein'] as num).toInt(),
+                              (estimate!['carbs'] as num).toInt(),
+                              (estimate!['fats'] as num).toInt(),
+                            );
+                            if (ctx.mounted) Navigator.pop(ctx);
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('✅ ${estimate!['item']} +${estimate!['calories']} kcal')),
+                              );
+                            }
+                          },
+                          style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: AppColors.surface),
+                          child: const Text('✅ Confirm'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.outline)),
+                        child: const Text('Cancel', style: TextStyle(color: AppColors.onSurfaceVariant)),
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _showQuickLogSheet() {
     final ctrl = TextEditingController();
     showModalBottomSheet(
@@ -424,11 +558,11 @@ class _AppShellState extends State<AppShell> with TickerProviderStateMixin {
       ),
       floatingActionButton: _currentIndex == 0
           ? FloatingActionButton(
-              onPressed: _showQuickLogSheet,
+              onPressed: _showFABOptions,
               backgroundColor: AppColors.primary,
               foregroundColor: AppColors.surface,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: const Icon(Icons.add_a_photo_rounded),
+              child: const Icon(Icons.add_rounded),
             )
           : null,
       bottomNavigationBar: NavigationBar(

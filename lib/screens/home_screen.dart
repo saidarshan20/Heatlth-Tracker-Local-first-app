@@ -20,6 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
   // Incremented each time this tab becomes active — changing the key forces
   // StaggerItem / EntranceFade widgets to rebuild and replay their animations.
   int _animationEpoch = 0;
+  bool _isActivityExpanded = false;
 
   @override
   void initState() {
@@ -340,105 +341,129 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text('📋 Today\'s Activity',
-                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
-                    const SizedBox(height: 8),
-
-                    if (dash.medicineLogsToday.isNotEmpty) ...[
-                      const Text('Medicines taken:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                      const SizedBox(height: 4),
-                      ...dash.medicineLogsToday.map((ml) => Dismissible(
-                        key: ValueKey('ml_${ml['id']}'),
-                        direction: DismissDirection.endToStart,
-                        background: Container(
-                          alignment: Alignment.centerRight,
-                          padding: const EdgeInsets.only(right: 16),
-                          child: const Text('Undo', style: TextStyle(color: AppColors.error, fontSize: 12)),
-                        ),
-                        onDismissed: (_) async {
-                          await dash.undoMedicine(ml['medicine_id'] as int);
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('↩️ ${ml['name']} undone')),
-                            );
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(vertical: 3),
-                          child: Row(children: [
-                            Text(dash.getMedEmoji(ml['type'] as String? ?? 'tablet'),
-                                style: const TextStyle(fontSize: 14)),
-                            const SizedBox(width: 8),
-                            Expanded(child: Text(ml['name'] as String,
-                                style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
-                            Text(ml['taken_at'] as String,
-                                style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                          ]),
-                        ),
-                      )),
-                      const Divider(height: 16, color: AppColors.outline),
-                    ],
-
-                    if (dash.waterEntries.isNotEmpty) ...[
-                      const Text('Water intake:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
-                      const SizedBox(height: 4),
-                      ...dash.waterEntries.map((w) {
-                        final isSoftDrink = (w['type'] ?? 'water') == 'soft_drink';
-                        final drinkName = w['drink_name'] as String?;
-                        return Dismissible(
-                          key: ValueKey('water_${w['id']}'),
-                          direction: DismissDirection.endToStart,
-                          background: Container(
-                            alignment: Alignment.centerRight,
-                            padding: const EdgeInsets.only(right: 16),
-                            child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
+                    GestureDetector(
+                      onTap: () => setState(() => _isActivityExpanded = !_isActivityExpanded),
+                      behavior: HitTestBehavior.opaque,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          const Text('📋 Today\'s Activity',
+                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: AppColors.onSurface)),
+                          Icon(
+                            _isActivityExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                            color: AppColors.onSurfaceVariant,
+                            size: 20,
                           ),
-                          onDismissed: (_) async {
-                            await dash.deleteWater(w['id'] as int);
-                            if (context.mounted) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(content: Text('🗑️ ${w['ml']}ml deleted')),
-                              );
-                            }
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 3),
-                            child: Row(children: [
-                              Text(isSoftDrink
-                                  ? DashboardProvider.drinkEmoji(drinkName ?? '')
-                                  : '💧', style: const TextStyle(fontSize: 14)),
-                              const SizedBox(width: 8),
-                              Text('+${w['ml']}ml',
-                                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                                      color: isSoftDrink ? const Color(0xFF9C27B0) : AppColors.water)),
-                              if (isSoftDrink && drinkName != null) ...[
-                                const SizedBox(width: 6),
-                                Text(DashboardProvider.drinkDisplayName(drinkName),
-                                    style: const TextStyle(fontSize: 10, color: Color(0xFF9C27B0))),
-                              ],
-                              const Spacer(),
-                              Builder(builder: (ctx) {
-                                String timeStr = '';
-                                if (w['created_at'] != null) {
-                                  try {
-                                    final raw = '${w['created_at'].toString().replaceAll(' ', 'T')}Z';
-                                    final dt = DateTime.parse(raw).toLocal();
-                                    final h = dt.hour.toString().padLeft(2, '0');
-                                    final m = dt.minute.toString().padLeft(2, '0');
-                                    timeStr = '$h:$m';
-                                  } catch (_) {}
+                        ],
+                      ),
+                    ),
+                    
+                    AnimatedSize(
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.easeOutCubic,
+                      alignment: Alignment.topCenter,
+                      child: _isActivityExpanded ? Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 12),
+                          if (dash.medicineLogsToday.isNotEmpty) ...[
+                            const Text('Medicines taken:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                            const SizedBox(height: 4),
+                            ...dash.medicineLogsToday.map((ml) => Dismissible(
+                              key: ValueKey('ml_${ml['id']}'),
+                              direction: DismissDirection.endToStart,
+                              background: Container(
+                                alignment: Alignment.centerRight,
+                                padding: const EdgeInsets.only(right: 16),
+                                child: const Text('Undo', style: TextStyle(color: AppColors.error, fontSize: 12)),
+                              ),
+                              onDismissed: (_) async {
+                                await dash.undoMedicine(ml['medicine_id'] as int);
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text('↩️ ${ml['name']} undone')),
+                                  );
                                 }
-                                return Text(timeStr, style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant));
-                              }),
-                            ]),
-                          ),
-                        );
-                      }),
-                    ],
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 3),
+                                child: Row(children: [
+                                  Text(dash.getMedEmoji(ml['type'] as String? ?? 'tablet'),
+                                      style: const TextStyle(fontSize: 14)),
+                                  const SizedBox(width: 8),
+                                  Expanded(child: Text(ml['name'] as String,
+                                      style: const TextStyle(fontSize: 12, color: AppColors.onSurface))),
+                                  Text(ml['taken_at'] as String,
+                                      style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                                ]),
+                              ),
+                            )),
+                            const Divider(height: 16, color: AppColors.outline),
+                          ],
 
-                    if (dash.medicineLogsToday.isEmpty && dash.waterEntries.isEmpty)
-                      const Text('Nothing logged yet today.',
-                          style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                          if (dash.waterEntries.isNotEmpty) ...[
+                            const Text('Water intake:', style: TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant)),
+                            const SizedBox(height: 4),
+                            ...dash.waterEntries.map((w) {
+                              final isSoftDrink = (w['type'] ?? 'water') == 'soft_drink';
+                              final drinkName = w['drink_name'] as String?;
+                              return Dismissible(
+                                key: ValueKey('water_${w['id']}'),
+                                direction: DismissDirection.endToStart,
+                                background: Container(
+                                  alignment: Alignment.centerRight,
+                                  padding: const EdgeInsets.only(right: 16),
+                                  child: const Icon(Icons.delete_outline, color: AppColors.error, size: 18),
+                                ),
+                                onDismissed: (_) async {
+                                  await dash.deleteWater(w['id'] as int);
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(content: Text('🗑️ ${w['ml']}ml deleted')),
+                                    );
+                                  }
+                                },
+                                child: Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 3),
+                                  child: Row(children: [
+                                    Text(isSoftDrink
+                                        ? DashboardProvider.drinkEmoji(drinkName ?? '')
+                                        : '💧', style: const TextStyle(fontSize: 14)),
+                                    const SizedBox(width: 8),
+                                    Text('+${w['ml']}ml',
+                                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                            color: isSoftDrink ? const Color(0xFF9C27B0) : AppColors.water)),
+                                    if (isSoftDrink && drinkName != null) ...[
+                                      const SizedBox(width: 6),
+                                      Text(DashboardProvider.drinkDisplayName(drinkName),
+                                          style: const TextStyle(fontSize: 10, color: Color(0xFF9C27B0))),
+                                    ],
+                                    const Spacer(),
+                                    Builder(builder: (ctx) {
+                                      String timeStr = '';
+                                      if (w['created_at'] != null) {
+                                        try {
+                                          final raw = '${w['created_at'].toString().replaceAll(' ', 'T')}Z';
+                                          final dt = DateTime.parse(raw).toLocal();
+                                          final h = dt.hour.toString().padLeft(2, '0');
+                                          final m = dt.minute.toString().padLeft(2, '0');
+                                          timeStr = '$h:$m';
+                                        } catch (_) {}
+                                      }
+                                      return Text(timeStr, style: const TextStyle(fontSize: 11, color: AppColors.onSurfaceVariant));
+                                    }),
+                                  ]),
+                                ),
+                              );
+                            }),
+                          ],
+
+                          if (dash.medicineLogsToday.isEmpty && dash.waterEntries.isEmpty)
+                            const Text('Nothing logged yet today.',
+                                style: TextStyle(fontSize: 12, color: AppColors.onSurfaceVariant)),
+                        ],
+                      ) : const SizedBox.shrink(),
+                    ),
                   ],
                 ),
               ),

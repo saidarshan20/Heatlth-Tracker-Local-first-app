@@ -67,14 +67,36 @@ class _LogScreenState extends State<LogScreen> with TickerProviderStateMixin {
   }
 
   Future<void> _analyzeWithGemini() async {
-    if (_aiCtrl.text.trim().isEmpty) return;
+    if (_pickedImage == null && _aiCtrl.text.trim().isEmpty) return;
     setState(() { _loading = true; _aiEstimate = null; });
 
-    final result = await GeminiService.parseFood(_aiCtrl.text.trim());
+    Map<String, dynamic>? result;
+    if (_pickedImage != null) {
+      final hint = _aiCtrl.text.trim().isEmpty ? null : _aiCtrl.text.trim();
+      result = await ImageFoodService.parseFoodFromImage(_pickedImage!, hint: hint);
+      if (!mounted) return;
+      if (result == null) {
+        final reason = ImageFoodService.lastError ?? 'unknown';
+        final msg = switch (reason) {
+          'missing_key' => '❌ Gemini key missing — check .env and do a full flutter run.',
+          'quota'       => '❌ Gemini free-tier quota exhausted. Try a new key or wait ~24h.',
+          'network'     => '❌ No internet — check your connection.',
+          'parse'       => "❌ Couldn't read the photo. Try a clearer shot.",
+          _             => "❌ Image parse failed: $reason",
+        };
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(msg), duration: const Duration(seconds: 5)),
+        );
+      }
+    } else {
+      result = await GeminiService.parseFood(_aiCtrl.text.trim());
+    }
+
+    if (!mounted) return;
     setState(() { _loading = false; _aiEstimate = result; });
   }
 
-  Future<void> _pickAndAnalyzeImage(ImageSource source) async {
+  Future<void> _pickImage(ImageSource source) async {
     final XFile? file = source == ImageSource.camera
         ? await ImageFoodService.captureFromCamera()
         : await ImageFoodService.pickFromGallery();
@@ -82,25 +104,7 @@ class _LogScreenState extends State<LogScreen> with TickerProviderStateMixin {
 
     setState(() { _loading = true; _aiEstimate = null; _pickedImage = null; });
     final compressed = await ImageFoodService.compress(file);
-    setState(() { _pickedImage = compressed; });
-
-    final hint = _aiCtrl.text.trim().isEmpty ? null : _aiCtrl.text.trim();
-    final result = await ImageFoodService.parseFoodFromImage(compressed, hint: hint);
-    if (!mounted) return;
-    setState(() { _loading = false; _aiEstimate = result; });
-    if (result == null) {
-      final reason = ImageFoodService.lastError ?? 'unknown';
-      final msg = switch (reason) {
-        'missing_key' => '❌ Gemini key missing — check .env and do a full flutter run.',
-        'quota'       => '❌ Gemini free-tier quota exhausted. Try a new key or wait ~24h.',
-        'network'     => '❌ No internet — check your connection.',
-        'parse'       => "❌ Couldn't read the photo. Try a clearer shot.",
-        _             => "❌ Image parse failed: $reason",
-      };
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), duration: const Duration(seconds: 5)),
-      );
-    }
+    setState(() { _loading = false; _pickedImage = compressed; });
   }
 
   void _clearPickedImage() {
@@ -236,7 +240,7 @@ class _LogScreenState extends State<LogScreen> with TickerProviderStateMixin {
                 children: [
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: _loading ? null : () => _pickAndAnalyzeImage(ImageSource.camera),
+                      onPressed: _loading ? null : () => _pickImage(ImageSource.camera),
                       icon: const Icon(Icons.photo_camera_rounded, size: 16, color: AppColors.primary),
                       label: const Text('Camera', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w600)),
                       style: OutlinedButton.styleFrom(
@@ -249,7 +253,7 @@ class _LogScreenState extends State<LogScreen> with TickerProviderStateMixin {
                   const SizedBox(width: 8),
                   Expanded(
                     child: OutlinedButton.icon(
-                      onPressed: _loading ? null : () => _pickAndAnalyzeImage(ImageSource.gallery),
+                      onPressed: _loading ? null : () => _pickImage(ImageSource.gallery),
                       icon: const Icon(Icons.photo_library_rounded, size: 16, color: AppColors.primary),
                       label: const Text('Gallery', style: TextStyle(fontSize: 12, color: AppColors.primary, fontWeight: FontWeight.w600)),
                       style: OutlinedButton.styleFrom(

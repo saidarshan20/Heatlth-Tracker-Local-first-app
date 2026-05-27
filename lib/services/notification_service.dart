@@ -434,64 +434,128 @@ class NotificationService {
     print('Suppressed sleep reminder — user started sleep early');
   }
 
-  static const int _waterSuppressionWindowMinutes = 20;
-
-  /// After logging water, cancel any water reminder scheduled to fire within
-  /// the next [_waterSuppressionWindowMinutes] minutes and reschedule from tomorrow.
-  static Future<void> suppressUpcomingWaterReminder() async {
-    final reminders = await DatabaseService.getReminders(type: 'water');
+  /// Evaluates current water intake against an event-rank pace model (water + meds).
+  /// Suppresses reminders if on pace, or customizes the message if behind.
+  static Future<void> evaluateWaterPace() async {
     final now = DateTime.now();
+    final todayStr = '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+    
+    final waterGoal = await DatabaseService.getSettingInt('water_goal', 3000);
+    
+    final reminders = await DatabaseService.getReminders(type: 'water');
+    final activeWater = reminders.where((r) => (r['active'] as int) == 1).toList();
+    final medicines = await DatabaseService.getMedicines();
+    
+    final List<Map<String, dynamic>> events = [];
+    
+    for (final r in activeWater) {
+      events.add({
+        'id': 2000 + (r['id'] as int),
+        'hour': r['hour'] as int,
+        'minute': r['minute'] as int,
+        'title': '💧 Water Reminder',
+        'isWater': true,
+      });
+    }
+    
+    for (final m in medicines) {
+      final parts = (m['reminder_time'] as String).split(':');
+      if (parts.length == 2) {
+        events.add({
+          'id': 1000 + (m['id'] as int),
+          'hour': int.tryParse(parts[0]) ?? 9,
+          'minute': int.tryParse(parts[1]) ?? 0,
+          'title': '💊 Medicine Reminder',
+          'isWater': false,
+        });
+      }
+    }
+    
+    events.sort((a, b) {
+      if (a['hour'] != b['hour']) return (a['hour'] as int).compareTo(b['hour'] as int);
+      return (a['minute'] as int).compareTo(b['minute'] as int);
+    });
+    
+    if (events.isEmpty) return;
+    
+    final pacePerEvent = waterGoal / events.length;
+    final currentWater = await DatabaseService.getWaterTotal(todayStr);
     final nowMins = now.hour * 60 + now.minute;
-    final windowEnd = nowMins + _waterSuppressionWindowMinutes;
-
-    for (final r in reminders) {
-      if ((r['active'] as int) != 1) continue;
-      final rMins = (r['hour'] as int) * 60 + (r['minute'] as int);
-
-      // Midnight-safe window check
-      final inWindow = windowEnd <= 1440
-          ? (rMins >= nowMins && rMins <= windowEnd)
-          : (rMins >= nowMins || rMins <= windowEnd % 1440);
-      if (!inWindow) continue;
-
-      final notifId = 2000 + (r['id'] as int);
-      await cancelNotification(notifId);
-      await scheduleDailyNotificationFromTomorrow(
-        id: notifId,
-        title: '💧 Water Reminder',
-        body: (r['label'] as String).isNotEmpty ? r['label'] as String : 'Time to drink some water!',
-        hour: r['hour'] as int,
-        minute: r['minute'] as int,
-      );
-      // Persist suppression so rescheduleAll() respects it across app restarts
-      await DatabaseService.suppressNotifForToday(notifId);
-      print('Suppressed water reminder #$notifId — water just logged');
+    
+    for (int i = 0; i < events.length; i++) {
+      final event = events[i];
+      final eventMins = (event['hour'] as int) * 60 + (event['minute'] as int);
+      
+      // We only care about water reminders that haven't passed yet today
+      if (event['isWater'] == true && eventMins > nowMins) {
+        final expectedWater = ((i + 1) * pacePerEvent).round();
+        final notifId = event['id'] as int;
+        
+        if (currentWater >= expectedWater) {
+          // On pace or ahead -> Suppress today
+          await cancelNotification(notifId);
+          await scheduleDailyNotificationFromTomorrow(
+            id: notifId,
+            title: event['title'] as String,
+            body: 'Time to drink some water!',
+            hour: event['hour'] as int,
+            minute: event['minute'] as int,
+          );
+          await DatabaseService.suppressNotifForToday(notifId);
+          print('evaluateWaterPace: Suppressed #$notifId (Current: $currentWater >= Expected: $expectedWater)');
+        } else {
+          // Behind pace -> Customize body and stop evaluation
+          await cancelNotification(notifId);
+          String newBody;
+          if (i == 0 && currentWater == 0) {
+            newBody = 'Day has started, start with a glass of water!';
+          } else {
+            final behind = expectedWater - currentWater;
+            newBody = '💧 ${currentWater}ml logged — ${behind}ml behind pace';
+          }
+          
+          await scheduleDailyNotification(
+            id: notifId,
+            title: event['title'] as String,
+            body: newBody,
+            hour: event['hour'] as int,
+            minute: event['minute'] as int,
+          );
+          // We intentionally do NOT suppress it today, because we want this new message to fire.
+          print('evaluateWaterPace: Updated #$notifId body to: "$newBody"');
+          break; // Stop evaluating so subsequent reminders keep default behavior for now
+        }
+      }
     }
   }
 
-  /// After logging food with a meal keyword (breakfast/lunch/dinner), cancel the
-  /// matching meal reminder for today and reschedule from tomorrow.
-  static Future<void> suppressMealReminderIfKeyword(String foodItem, {String? rawInput}) async {
-    // Check both the AI-processed name and the user's original input for keywords
+  /// Suppresses a meal reminder if food logged matches keywords OR is within ±45 min.
+  static Future<void> suppressMealReminderIfRelevant(String foodItem, {String? rawInput}) async {
+    final activeFast = await DatabaseService.getActiveFast();
+    if (activeFast != null) return; // Handled by rescheduleAll
+
     final itemLower = foodItem.toLowerCase();
     final rawLower = rawInput?.toLowerCase() ?? '';
     final keywords = <String>[];
     if (itemLower.contains('breakfast') || rawLower.contains('breakfast')) keywords.add('breakfast');
     if (itemLower.contains('lunch') || rawLower.contains('lunch')) keywords.add('lunch');
     if (itemLower.contains('dinner') || rawLower.contains('dinner')) keywords.add('dinner');
-    if (keywords.isEmpty) return;
-
-    // Skip scheduling-from-tomorrow if a fast is active — rescheduleAll handles resumption on fast end
-    final activeFast = await DatabaseService.getActiveFast();
 
     final reminders = await DatabaseService.getReminders(type: 'meal');
+    final now = DateTime.now();
+    final nowMins = now.hour * 60 + now.minute;
+
     for (final r in reminders) {
       if ((r['active'] as int) != 1) continue;
-      if (!keywords.any((kw) => (r['label'] as String).toLowerCase().contains(kw))) continue;
+      final label = (r['label'] as String).toLowerCase();
+      final rMins = (r['hour'] as int) * 60 + (r['minute'] as int);
+      
+      bool keywordMatch = keywords.any((kw) => label.contains(kw));
+      bool timeMatch = (rMins - nowMins).abs() <= 45;
 
-      final notifId = 3000 + (r['id'] as int);
-      await cancelNotification(notifId);
-      if (activeFast == null) {
+      if (keywordMatch || timeMatch) {
+        final notifId = 3000 + (r['id'] as int);
+        await cancelNotification(notifId);
         await scheduleDailyNotificationFromTomorrow(
           id: notifId,
           title: '🍽️ Meal Reminder',
@@ -499,10 +563,9 @@ class NotificationService {
           hour: r['hour'] as int,
           minute: r['minute'] as int,
         );
+        await DatabaseService.suppressNotifForToday(notifId);
+        print('Suppressed meal reminder #$notifId — Match(KW:$keywordMatch, Time:$timeMatch)');
       }
-      // Persist suppression so rescheduleAll() respects it across app restarts
-      await DatabaseService.suppressNotifForToday(notifId);
-      print('Suppressed meal reminder #$notifId — "$foodItem" logged');
     }
   }
 
@@ -652,6 +715,9 @@ class NotificationService {
       }
 
       print('Rescheduled ${medicines.length} medicine + ${reminders.where((r) => (r['active'] as int) == 1).length} other reminders');
+
+      // Finally, evaluate water pace to apply custom messages or suppressions based on the fresh schedule
+      await evaluateWaterPace();
     } finally {
       _isRescheduling = false;
     }

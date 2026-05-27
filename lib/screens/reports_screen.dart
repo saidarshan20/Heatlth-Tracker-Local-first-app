@@ -220,14 +220,20 @@ class _ReportsScreenState extends State<ReportsScreen>
                         
                         final color = overGoal
                             ? AppColors.error
-                            : (isToday ? AppColors.primary : AppColors.surfaceContainerHigh);
+                            : (isToday ? AppColors.primary : AppColors.primary.withValues(alpha: 0.45));
+                        
+                        // If it's 0 (a gap/empty day), we can just draw a tiny sliver so it's not totally empty, 
+                        // or leave it as 0. The background bar handles the placeholder.
+                        // We will ensure a minimum visual tick for 0 values to 'fill the gaps' slightly
+                        final drawVal = val == 0 ? (maxY * 0.015) : val;
+
                         return BarChartGroupData(
                           x: i,
                           showingTooltipIndicators: isCapped ? [0] : [],
                           barRods: [
                             BarChartRodData(
-                              toY: val,
-                              width: 20,
+                              toY: drawVal,
+                              width: 24, // slightly wider to fill gaps between bars
                               borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
                               color: color,
                               backDrawRodData: BackgroundBarChartRodData(
@@ -246,12 +252,17 @@ class _ReportsScreenState extends State<ReportsScreen>
                         bottomTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            getTitlesWidget: (v, _) => Text(
-                              reordered[v.toInt()],
-                              style: TextStyle(
-                                fontSize: 10, fontFamily: 'DMSans',
-                                color: v.toInt() == 6 ? AppColors.primary : AppColors.onSurfaceVariant,
-                                fontWeight: v.toInt() == 6 ? FontWeight.w700 : FontWeight.w400,
+                            reservedSize: 28,
+                            getTitlesWidget: (v, meta) => SideTitleWidget(
+                              meta: meta,
+                              space: 6, // adds a gap between the bar and the text
+                              child: Text(
+                                reordered[v.toInt()],
+                                style: TextStyle(
+                                  fontSize: 11, fontFamily: 'DMSans',
+                                  color: v.toInt() == 6 ? AppColors.primary : AppColors.onSurfaceVariant,
+                                  fontWeight: v.toInt() == 6 ? FontWeight.w700 : FontWeight.w400,
+                                ),
                               ),
                             ),
                           ),
